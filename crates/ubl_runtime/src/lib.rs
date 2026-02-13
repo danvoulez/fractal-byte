@@ -3,6 +3,8 @@ pub mod cid;
 pub mod bind;
 pub mod engine;
 pub mod error;
+pub mod jws;
+pub mod nrf_canon;
 pub mod rb_bridge;
 pub mod transition;
 

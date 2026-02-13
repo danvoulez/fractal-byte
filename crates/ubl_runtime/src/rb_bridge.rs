@@ -5,7 +5,7 @@
 
 use rb_vm::{Vm, VmConfig, ExecError, Cid};
 use rb_vm::exec::{CasProvider, SignProvider};
-use rb_vm::canon::NaiveCanon;
+use crate::nrf_canon::Nrf1Canon;
 use rb_vm::tlv;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
 
     let mut cas = MemCas::new();
     let signer = FixedSigner::from_seed([7u8; 32]);
-    let canon = NaiveCanon;
+    let canon = Nrf1Canon;
 
     // (A) Capture raw bytes BEFORE normalization (layer -1)
     let raw_bytes = serde_json::to_vec(&req.inputs)
@@ -121,9 +121,16 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
     );
 
     let tr_cid = tr.cid()?;
+    let tr_body_bytes = tr.canonical_bytes()?;
+
+    // (D) JWS detached signature (b64=false, payload = canonical body bytes)
+    let sign_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let jws = crate::jws::sign_detached(&tr_body_bytes, &sign_key, "did:dev#k1");
+
     let tr_envelope = serde_json::json!({
         "cid": tr_cid,
         "body": serde_json::to_value(&tr).map_err(|e| crate::error::RuntimeError::Engine(e.to_string()))?,
+        "proof": serde_json::to_value(&jws).map_err(|e| crate::error::RuntimeError::Engine(e.to_string()))?,
     });
 
     Ok(ExecuteRbRes {

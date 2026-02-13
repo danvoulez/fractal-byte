@@ -1,5 +1,6 @@
 
-use axum::{extract::Path, http::{StatusCode, header}, response::IntoResponse, Json};
+use axum::{extract::{Path, State}, http::{StatusCode, header}, response::IntoResponse, Json};
+use crate::AppState;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -136,7 +137,7 @@ pub struct ExecRbResponse {
     pub transition_receipt: Option<Value>,
 }
 
-pub async fn execute_rb(Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
+pub async fn execute_rb(State(state): State<AppState>, Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
     let chip = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.chip_b64) {
         Ok(b) => b,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid base64 chip"}))).into_response(),
@@ -149,6 +150,17 @@ pub async fn execute_rb(Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
     };
     match ubl_runtime::execute_rb(&rb_req) {
         Ok(res) => {
+            // Store transition receipt for GET /v1/transition/:cid
+            if let Some(ref tr) = res.transition_receipt {
+                if let Some(cid) = tr.get("cid").and_then(|c| c.as_str()) {
+                    let mut store = state.transition_receipts.write().unwrap();
+                    store.insert(cid.to_string(), tr.clone());
+                    // Also index by rho_cid for lookup convenience
+                    if let Some(rho) = tr.get("body").and_then(|b| b.get("rho_cid")).and_then(|r| r.as_str()) {
+                        store.insert(rho.to_string(), tr.clone());
+                    }
+                }
+            }
             let resp = ExecRbResponse {
                 rc_cid: res.rc_cid,
                 steps: res.steps,
@@ -160,6 +172,17 @@ pub async fn execute_rb(Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
         Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
             "error": "execute_rb_failed",
             "detail": e.to_string()
+        }))).into_response(),
+    }
+}
+
+pub async fn get_transition(State(state): State<AppState>, Path(cid): Path<String>) -> impl IntoResponse {
+    let store = state.transition_receipts.read().unwrap();
+    match store.get(&cid) {
+        Some(envelope) => (StatusCode::OK, Json(envelope.clone())).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({
+            "error": "transition_not_found",
+            "cid": cid
         }))).into_response(),
     }
 }

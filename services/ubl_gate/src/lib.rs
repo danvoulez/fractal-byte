@@ -2,8 +2,16 @@ pub mod api;
 
 use axum::{routing::{get, post}, Json, Router};
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+#[derive(Clone, Default)]
+pub struct AppState {
+    pub transition_receipts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+}
 
 pub fn app() -> Router {
+    let state = AppState::default();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/ingest", post(api::ingest))
@@ -12,8 +20,10 @@ pub fn app() -> Router {
         .route("/v1/resolve", post(api::resolve))
         .route("/v1/execute", post(api::execute_runtime))
         .route("/v1/execute/rb", post(api::execute_rb))
+        .route("/v1/transition/:cid", get(api::get_transition))
         .route("/cid/:cid", get(api::get_cid_dispatch))
         .route("/.well-known/did.json", get(api::well_known_did_json))
+        .with_state(state)
 }
 
 async fn healthz() -> Json<serde_json::Value> {

@@ -9,6 +9,7 @@ serde_json = "1"
 thiserror = "2"
 blake3 = "1.5"
 rb_vm = { path = "../rb_vm" }
+ubl_ai_nrf1 = { path = "../ubl_ai_nrf1" }
 hex = "0.4"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 unicode-normalization = "0.1"
