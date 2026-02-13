@@ -155,7 +155,7 @@ async fn execute_happy_path() {
 }
 
 #[tokio::test]
-async fn execute_determinism() {
+async fn execute_determinism_and_idempotency() {
     let (base, http, _h) = setup().await;
     let manifest = json!({
         "pipeline": "det",
@@ -174,11 +174,21 @@ async fn execute_determinism() {
     let vars: BTreeMap<String, Value> = BTreeMap::from([("data".into(), json!("aGVsbG8="))]);
     let req = json!({"manifest": manifest, "vars": vars});
 
-    let r1: Value = http.post(format!("{}/v1/execute", base))
-        .json(&req).send().await.unwrap().json().await.unwrap();
-    let r2: Value = http.post(format!("{}/v1/execute", base))
-        .json(&req).send().await.unwrap().json().await.unwrap();
-    assert_eq!(r1["cid"], r2["cid"], "execute must be deterministic");
+    // First call succeeds with a deterministic b3: CID
+    let r1 = http.post(format!("{}/v1/execute", base))
+        .json(&req).send().await.unwrap();
+    assert_eq!(r1.status(), 200);
+    let body1: Value = r1.json().await.unwrap();
+    let cid = body1["cid"].as_str().unwrap();
+    assert!(cid.starts_with("b3:"), "CID must be b3: prefixed");
+    assert_eq!(cid.len(), 67, "b3:<64 hex chars>");
+
+    // Replay same input → 409 CONFLICT (idempotency)
+    let r2 = http.post(format!("{}/v1/execute", base))
+        .json(&req).send().await.unwrap();
+    assert_eq!(r2.status(), 409, "replay must return 409 CONFLICT");
+    let body2: Value = r2.json().await.unwrap();
+    assert!(body2["detail"].as_str().unwrap().contains("duplicate request"));
 }
 
 #[tokio::test]

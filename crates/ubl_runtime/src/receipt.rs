@@ -185,17 +185,18 @@ pub fn run_with_receipts(
             "pipeline": &manifest.pipeline
         }
     });
-    let mut wa = build_receipt("ubl/wa", wa_parents, wa_body, sign_key, kid)?;
-    if ghost { wa.observability = Some(serde_json::json!({"ghost": true})); }
-
-    // Idempotency check
+    // Idempotency check: same inputs + pipeline = replay
+    let idempotency_key = format!("{}:{}", manifest.pipeline, inputs_raw_cid);
     if let Some(seen) = opts.seen {
-        if seen.contains(&wa.body_cid) {
+        if seen.contains(&idempotency_key) {
             return Err(crate::error::RuntimeError::Validation(
-                format!("duplicate body_cid (replay): {}", wa.body_cid),
+                format!("duplicate request (replay): pipeline={} inputs_cid={}", manifest.pipeline, inputs_raw_cid),
             ));
         }
     }
+
+    let mut wa = build_receipt("ubl/wa", wa_parents, wa_body, sign_key, kid)?;
+    if ghost { wa.observability = Some(serde_json::json!({"ghost": true})); }
 
     // (2) Transition -1→0 (rho.normalize)
     let rho_val = serde_json::to_value(vars)?;
@@ -491,22 +492,25 @@ mod tests {
     // ── Idempotency tests ────────────────────────────────────────
 
     #[test]
-    fn idempotency_rejects_duplicate_body_cid() {
+    fn idempotency_rejects_replay() {
         use std::collections::HashSet;
 
         let (manifest, vars, cfg) = test_manifest_vars_cfg();
         let keys = KeyRing::dev();
 
-        // First run to get the body_cid
-        let r1 = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
-        let mut seen = HashSet::new();
-        seen.insert(r1.wa.body_cid.clone());
+        // Compute the idempotency key: pipeline:inputs_raw_cid
+        let raw_bytes = serde_json::to_vec(&vars).unwrap();
+        let inputs_cid = crate::cid::cid_b3(&raw_bytes);
+        let idemp_key = format!("{}:{}", manifest.pipeline, inputs_cid);
 
-        // Second run with same input should be rejected
+        let mut seen = HashSet::new();
+        seen.insert(idemp_key);
+
+        // Run with same input should be rejected as replay
         let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: Some(&seen) };
         let err = run_with_receipts(&manifest, &vars, &cfg, &opts);
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("duplicate body_cid"));
+        assert!(err.unwrap_err().to_string().contains("duplicate request (replay)"));
     }
 
     // ── Prev-tip chaining tests ──────────────────────────────────

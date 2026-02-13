@@ -221,14 +221,16 @@ pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<Exec
                 store.insert(run.wf.body_cid.clone(), serde_json::to_value(&run.wf).unwrap());
             }
 
-            // Always track seen_cids (even ghost) for idempotency
+            // Track idempotency key: pipeline:inputs_raw_cid
             {
+                let inputs_cid = run.wa.body.get("inputs_raw_cid")
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                let pipeline = run.wa.body.get("intention")
+                    .and_then(|v| v.get("pipeline"))
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                let key = format!("{}:{}", pipeline, inputs_cid);
                 let mut seen = state.seen_cids.write().unwrap();
-                seen.insert(run.wa.body_cid.clone());
-                if let Some(ref tr) = run.transition {
-                    seen.insert(tr.body_cid.clone());
-                }
-                seen.insert(run.wf.body_cid.clone());
+                seen.insert(key);
             }
 
             // Update tip
@@ -255,7 +257,7 @@ pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<Exec
         }
         Err(e) => {
             let detail = e.to_string();
-            let status = if detail.contains("duplicate body_cid") {
+            let status = if detail.contains("duplicate request") {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
