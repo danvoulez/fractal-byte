@@ -2,11 +2,19 @@
 //!
 //! Every receipt has: type tag, parent chain, canonical body, body CID,
 //! JWS detached signature, and optional observability metadata.
+//!
+//! Invariants enforced:
+//! - Schema: t must be a known tag, parents/body/body_cid/proof required
+//! - Chaining: parents[0] == prev_tip when prev_tip is provided
+//! - Idempotency: duplicate body_cid is rejected
+//! - Ghost: ghost=true ⇒ observability.ghost=true, ledger skip signaled
 
 use serde::{Serialize, Deserialize};
 use crate::cid::cid_b3;
 use crate::canon::canonical_bytes;
 use crate::jws::{sign_detached, JwsDetached};
+
+const VALID_TYPES: &[&str] = &["ubl/wa", "ubl/transition", "ubl/wf", "ubl/attestation"];
 
 /// Unified receipt envelope used across all pipeline stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,9 +42,84 @@ pub struct RunResult {
     pub wf: Receipt,
     /// CID of the WF receipt body (the "tip" of the chain)
     pub tip_cid: String,
+    /// Whether this run was in ghost mode (ledger should NOT persist)
+    pub ghost: bool,
+}
+
+/// Signing context: active key + optional next key for rotation.
+#[derive(Clone)]
+pub struct KeyRing {
+    pub active: ed25519_dalek::SigningKey,
+    pub active_kid: String,
+    pub next: Option<ed25519_dalek::SigningKey>,
+    pub next_kid: Option<String>,
+}
+
+impl KeyRing {
+    pub fn dev() -> Self {
+        Self {
+            active: ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            active_kid: "did:dev#k1".into(),
+            next: None,
+            next_kid: None,
+        }
+    }
+}
+
+/// Pipeline options for run_with_receipts.
+pub struct RunOpts<'a> {
+    pub prev_tip: Option<&'a str>,
+    pub ghost: bool,
+    pub keys: &'a KeyRing,
+    /// Already-seen body_cids for idempotency (caller provides)
+    pub seen: Option<&'a std::collections::HashSet<String>>,
+}
+
+impl<'a> Default for RunOpts<'a> {
+    fn default() -> Self {
+        // Can't store a reference to a temporary, so this is only for tests
+        // In practice callers should construct RunOpts explicitly
+        Self { prev_tip: None, ghost: false, keys: &DEVKEYS, seen: None }
+    }
+}
+
+static DEVKEYS: once_cell::sync::Lazy<KeyRing> = once_cell::sync::Lazy::new(KeyRing::dev);
+
+/// Validate a receipt against the canonical schema.
+pub fn validate_receipt(rc: &Receipt) -> crate::error::Result<()> {
+    if !VALID_TYPES.contains(&rc.t.as_str()) {
+        return Err(crate::error::RuntimeError::Validation(
+            format!("invalid receipt type '{}', expected one of {:?}", rc.t, VALID_TYPES),
+        ));
+    }
+    if rc.body_cid.is_empty() || !rc.body_cid.starts_with("b3:") {
+        return Err(crate::error::RuntimeError::Validation(
+            "body_cid must be non-empty and start with 'b3:'".into(),
+        ));
+    }
+    if rc.proof.signature.is_empty() {
+        return Err(crate::error::RuntimeError::Validation(
+            "proof.signature must not be empty".into(),
+        ));
+    }
+    if rc.proof.kid.is_empty() {
+        return Err(crate::error::RuntimeError::Validation(
+            "proof.kid must not be empty".into(),
+        ));
+    }
+    // body_cid must match canonical body
+    let body_bytes = canonical_bytes(&rc.body)?;
+    let expected_cid = cid_b3(&body_bytes);
+    if expected_cid != rc.body_cid {
+        return Err(crate::error::RuntimeError::Validation(
+            format!("body_cid mismatch: expected {}, got {}", expected_cid, rc.body_cid),
+        ));
+    }
+    Ok(())
 }
 
 /// Build a signed receipt from a type tag, parents, and body value.
+/// Validates the receipt against the schema before returning.
 pub fn build_receipt(
     t: &str,
     parents: Vec<String>,
@@ -47,14 +130,16 @@ pub fn build_receipt(
     let body_bytes = canonical_bytes(&body)?;
     let body_cid = cid_b3(&body_bytes);
     let proof = sign_detached(&body_bytes, sign_key, kid);
-    Ok(Receipt {
+    let rc = Receipt {
         t: t.into(),
         parents,
         body,
         body_cid,
         proof,
         observability: None,
-    })
+    };
+    validate_receipt(&rc)?;
+    Ok(rc)
 }
 
 /// Verify a receipt's body_cid matches the canonical body bytes.
@@ -68,28 +153,49 @@ pub fn verify_body_cid(receipt: &Receipt) -> crate::error::Result<bool> {
 ///
 /// Every execution produces exactly 3 receipts (WA, Transition, WF) chained by parent CIDs.
 /// The "tip" is the WF receipt's body_cid.
+///
+/// Invariants:
+/// - Schema validated on every receipt before returning
+/// - parents[0] == prev_tip when provided
+/// - Duplicate body_cid rejected (idempotency)
+/// - ghost=true ⇒ observability.ghost=true on all receipts
 pub fn run_with_receipts(
     manifest: &crate::engine::Manifest,
     vars: &std::collections::BTreeMap<String, serde_json::Value>,
     cfg: &crate::engine::ExecuteConfig,
-    prev_tip: Option<&str>,
+    opts: &RunOpts,
 ) -> crate::error::Result<RunResult> {
-    let sign_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-    let kid = "did:dev#k1";
+    let sign_key = &opts.keys.active;
+    let kid = opts.keys.active_kid.as_str();
+    let ghost = opts.ghost;
 
     // (1) WA — write-ahead (ghost/intention)
+    let wa_parents = match opts.prev_tip {
+        Some(tip) => vec![tip.to_string()],
+        None => vec![],
+    };
     let raw_bytes = serde_json::to_vec(vars)?;
     let inputs_raw_cid = cid_b3(&raw_bytes);
     let wa_body = serde_json::json!({
         "type": "ubl/wa",
-        "prev_tip": prev_tip,
+        "prev_tip": opts.prev_tip,
         "inputs_raw_cid": inputs_raw_cid,
         "intention": {
             "op": "execute",
             "pipeline": &manifest.pipeline
         }
     });
-    let wa = build_receipt("ubl/wa", vec![], wa_body, &sign_key, kid)?;
+    let mut wa = build_receipt("ubl/wa", wa_parents, wa_body, sign_key, kid)?;
+    if ghost { wa.observability = Some(serde_json::json!({"ghost": true})); }
+
+    // Idempotency check
+    if let Some(seen) = opts.seen {
+        if seen.contains(&wa.body_cid) {
+            return Err(crate::error::RuntimeError::Validation(
+                format!("duplicate body_cid (replay): {}", wa.body_cid),
+            ));
+        }
+    }
 
     // (2) Transition -1→0 (rho.normalize)
     let rho_val = serde_json::to_value(vars)?;
@@ -104,16 +210,41 @@ pub fn run_with_receipts(
         "rho_cid": rho_cid,
         "witness": { "vm": "ubl-runtime@0.1.0" }
     });
-    let transition = build_receipt(
+    let mut transition = build_receipt(
         "ubl/transition",
         vec![wa.body_cid.clone()],
         tr_body,
-        &sign_key,
+        sign_key,
         kid,
     )?;
+    if ghost { transition.observability = Some(serde_json::json!({"ghost": true})); }
 
     // (3) Execute deterministic pipeline (parse → policy → render)
-    let exec_result = crate::engine::execute(manifest, vars, cfg)?;
+    // On failure → produce DENY WF receipt, never 500
+    let exec_result = match crate::engine::execute(manifest, vars, cfg) {
+        Ok(r) => r,
+        Err(e) => {
+            // DENY WF with error reason
+            let wf_body = serde_json::json!({
+                "type": "ubl/wf",
+                "rho_cid": rho_cid,
+                "outputs_cid": null,
+                "decision": "DENY",
+                "reason": e.to_string(),
+                "dimension_stack": [],
+            });
+            let mut wf = build_receipt(
+                "ubl/wf",
+                vec![wa.body_cid.clone(), transition.body_cid.clone()],
+                wf_body,
+                sign_key,
+                kid,
+            )?;
+            if ghost { wf.observability = Some(serde_json::json!({"ghost": true})); }
+            let tip_cid = wf.body_cid.clone();
+            return Ok(RunResult { wa, transition: Some(transition), wf, tip_cid, ghost });
+        }
+    };
 
     // (4) WF — write-final (result)
     let wf_body = serde_json::json!({
@@ -123,13 +254,14 @@ pub fn run_with_receipts(
         "decision": if exec_result.dimension_stack.contains(&"policy".to_string()) { "ALLOW" } else { "DENY" },
         "dimension_stack": exec_result.dimension_stack,
     });
-    let wf = build_receipt(
+    let mut wf = build_receipt(
         "ubl/wf",
         vec![wa.body_cid.clone(), transition.body_cid.clone()],
         wf_body,
-        &sign_key,
+        sign_key,
         kid,
     )?;
+    if ghost { wf.observability = Some(serde_json::json!({"ghost": true})); }
 
     let tip_cid = wf.body_cid.clone();
 
@@ -138,7 +270,25 @@ pub fn run_with_receipts(
         transition: Some(transition),
         wf,
         tip_cid,
+        ghost,
     })
+}
+
+/// Convenience wrapper using dev keys and no prev_tip (backward compat for simple calls).
+pub fn run_with_receipts_simple(
+    manifest: &crate::engine::Manifest,
+    vars: &std::collections::BTreeMap<String, serde_json::Value>,
+    cfg: &crate::engine::ExecuteConfig,
+    prev_tip: Option<&str>,
+) -> crate::error::Result<RunResult> {
+    let keys = KeyRing::dev();
+    let opts = RunOpts {
+        prev_tip,
+        ghost: false,
+        keys: &keys,
+        seen: None,
+    };
+    run_with_receipts(manifest, vars, cfg, &opts)
 }
 
 #[cfg(test)]
@@ -214,7 +364,7 @@ mod tests {
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
         let cfg = ExecuteConfig { version: "0.1.0".into() };
 
-        let result = run_with_receipts(&manifest, &vars, &cfg, None).unwrap();
+        let result = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
 
         // All three receipts exist
         assert_eq!(result.wa.t, "ubl/wa");
@@ -263,8 +413,8 @@ mod tests {
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
         let cfg = ExecuteConfig { version: "0.1.0".into() };
 
-        let r1 = run_with_receipts(&manifest, &vars, &cfg, None).unwrap();
-        let r2 = run_with_receipts(&manifest, &vars, &cfg, None).unwrap();
+        let r1 = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
+        let r2 = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
         assert_eq!(r1.tip_cid, r2.tip_cid);
         assert_eq!(r1.wa.body_cid, r2.wa.body_cid);
         assert_eq!(
@@ -297,8 +447,156 @@ mod tests {
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
         let cfg = ExecuteConfig { version: "0.1.0".into() };
 
-        let result = run_with_receipts(&manifest, &vars, &cfg, None).unwrap();
+        let result = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
         assert_eq!(result.wf.body["decision"], "ALLOW");
         assert!(result.wf.body["outputs_cid"].as_str().unwrap().starts_with("b3:"));
+    }
+
+    // ── Schema validation tests ──────────────────────────────────
+
+    #[test]
+    fn validate_rejects_bad_type() {
+        let key = test_key();
+        let err = build_receipt("ubl/bogus", vec![], json!({"a":1}), &key, "did:dev#k1");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("invalid receipt type"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_kid() {
+        let key = test_key();
+        let err = build_receipt("ubl/wa", vec![], json!({"a":1}), &key, "");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("kid"));
+    }
+
+    // ── Ghost mode tests ─────────────────────────────────────────
+
+    #[test]
+    fn ghost_mode_sets_observability() {
+        use std::collections::BTreeMap;
+        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
+
+        let (manifest, vars, cfg) = test_manifest_vars_cfg();
+        let keys = KeyRing::dev();
+        let opts = RunOpts { prev_tip: None, ghost: true, keys: &keys, seen: None };
+        let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
+
+        assert!(result.ghost);
+        assert_eq!(result.wa.observability.as_ref().unwrap()["ghost"], true);
+        assert_eq!(result.transition.as_ref().unwrap().observability.as_ref().unwrap()["ghost"], true);
+        assert_eq!(result.wf.observability.as_ref().unwrap()["ghost"], true);
+    }
+
+    // ── Idempotency tests ────────────────────────────────────────
+
+    #[test]
+    fn idempotency_rejects_duplicate_body_cid() {
+        use std::collections::HashSet;
+
+        let (manifest, vars, cfg) = test_manifest_vars_cfg();
+        let keys = KeyRing::dev();
+
+        // First run to get the body_cid
+        let r1 = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
+        let mut seen = HashSet::new();
+        seen.insert(r1.wa.body_cid.clone());
+
+        // Second run with same input should be rejected
+        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: Some(&seen) };
+        let err = run_with_receipts(&manifest, &vars, &cfg, &opts);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("duplicate body_cid"));
+    }
+
+    // ── Prev-tip chaining tests ──────────────────────────────────
+
+    #[test]
+    fn prev_tip_appears_in_wa_parents() {
+        let (manifest, vars, cfg) = test_manifest_vars_cfg();
+        let result = run_with_receipts_simple(&manifest, &vars, &cfg, Some("b3:prev_tip_abc")).unwrap();
+        assert_eq!(result.wa.parents[0], "b3:prev_tip_abc");
+    }
+
+    // ── DENY on engine failure ────────────────────────────────────
+
+    #[test]
+    fn engine_failure_produces_deny_wf() {
+        use std::collections::BTreeMap;
+        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
+
+        let in_g = Grammar {
+            inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
+            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            output_from: "raw.bytes".into(),
+        };
+        let out_g = Grammar {
+            inputs: BTreeMap::from([("content".into(), json!(""))]),
+            mappings: vec![],
+            output_from: "content".into(),
+        };
+        let manifest = Manifest {
+            pipeline: "test".into(),
+            in_grammar: in_g,
+            out_grammar: out_g,
+            policy: Policy { allow: false }, // will cause policy deny
+        };
+        let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
+        let cfg = ExecuteConfig { version: "0.1.0".into() };
+
+        // Should NOT return Err — should produce a DENY WF receipt
+        let result = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
+        assert_eq!(result.wf.body["decision"], "DENY");
+        assert!(result.wf.body["reason"].as_str().unwrap().contains("policy deny"));
+        assert!(result.wf.body["outputs_cid"].is_null());
+    }
+
+    // ── Key rotation test ────────────────────────────────────────
+
+    #[test]
+    fn custom_keyring_signs_with_active_kid() {
+        let custom_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let keys = KeyRing {
+            active: custom_key,
+            active_kid: "did:custom#k2".into(),
+            next: Some(ed25519_dalek::SigningKey::from_bytes(&[99u8; 32])),
+            next_kid: Some("did:custom#k3".into()),
+        };
+        let (manifest, vars, cfg) = test_manifest_vars_cfg();
+        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: None };
+        let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
+        assert_eq!(result.wa.proof.kid, "did:custom#k2");
+        assert_eq!(result.wf.proof.kid, "did:custom#k2");
+    }
+
+    // ── Helper ────────────────────────────────────────────────────
+
+    fn test_manifest_vars_cfg() -> (
+        crate::engine::Manifest,
+        std::collections::BTreeMap<String, serde_json::Value>,
+        crate::engine::ExecuteConfig,
+    ) {
+        use std::collections::BTreeMap;
+        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
+
+        let in_g = Grammar {
+            inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
+            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            output_from: "raw.bytes".into(),
+        };
+        let out_g = Grammar {
+            inputs: BTreeMap::from([("content".into(), json!(""))]),
+            mappings: vec![],
+            output_from: "content".into(),
+        };
+        let manifest = Manifest {
+            pipeline: "test".into(),
+            in_grammar: in_g,
+            out_grammar: out_g,
+            policy: Policy { allow: true },
+        };
+        let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
+        let cfg = ExecuteConfig { version: "0.1.0".into() };
+        (manifest, vars, cfg)
     }
 }

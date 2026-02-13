@@ -182,7 +182,7 @@ async fn execute_determinism() {
 }
 
 #[tokio::test]
-async fn execute_policy_deny_returns_422() {
+async fn execute_policy_deny_returns_deny_receipt() {
     let (base, http, _h) = setup().await;
     let manifest = json!({
         "pipeline": "deny",
@@ -202,14 +202,16 @@ async fn execute_policy_deny_returns_422() {
     let resp = http.post(format!("{}/v1/execute", base))
         .json(&json!({"manifest": manifest, "vars": vars}))
         .send().await.unwrap();
-    assert_eq!(resp.status(), 422, "policy deny must return 422");
+    assert_eq!(resp.status(), 200, "policy deny now returns 200 with DENY receipt");
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "execute_failed");
-    assert!(body["detail"].as_str().unwrap().contains("policy deny"));
+    assert_eq!(body["decision"], "DENY");
+    assert_eq!(body["receipts"]["wf"]["body"]["decision"], "DENY");
+    assert!(body["receipts"]["wf"]["body"]["reason"].as_str().unwrap().contains("policy deny"));
+    assert!(body["receipts"]["wa"]["t"].as_str().unwrap() == "ubl/wa");
 }
 
 #[tokio::test]
-async fn execute_bad_codec_returns_422() {
+async fn execute_bad_codec_returns_deny_receipt() {
     let (base, http, _h) = setup().await;
     let manifest = json!({
         "pipeline": "bad",
@@ -229,9 +231,11 @@ async fn execute_bad_codec_returns_422() {
     let resp = http.post(format!("{}/v1/execute", base))
         .json(&json!({"manifest": manifest, "vars": vars}))
         .send().await.unwrap();
-    assert_eq!(resp.status(), 422);
+    assert_eq!(resp.status(), 200, "bad codec now returns 200 with DENY receipt");
     let body: Value = resp.json().await.unwrap();
-    assert!(body["detail"].as_str().unwrap().contains("unknown codec"));
+    assert_eq!(body["decision"], "DENY");
+    assert_eq!(body["receipts"]["wf"]["body"]["decision"], "DENY");
+    assert!(body["receipts"]["wf"]["body"]["reason"].as_str().unwrap().contains("unknown codec"));
 }
 
 // ── DID document structure ───────────────────────────────────────

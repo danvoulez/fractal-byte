@@ -187,12 +187,32 @@ pub async fn get_transition(State(state): State<AppState>, Path(cid): Path<Strin
     }
 }
 
-pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<ExecRequest>) -> impl IntoResponse {
+#[derive(Debug, Deserialize)]
+pub struct ExecRequestFull {
+    pub manifest: ubl_runtime::Manifest,
+    pub vars: BTreeMap<String, Value>,
+    pub ghost: Option<bool>,
+}
+
+pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<ExecRequestFull>) -> impl IntoResponse {
     let cfg = ubl_runtime::ExecuteConfig { version: "0.1.0".into() };
-    match ubl_runtime::run_with_receipts(&req.manifest, &req.vars, &cfg, None) {
+
+    // Read prev_tip and seen_cids for chaining + idempotency
+    let prev_tip = state.last_tip.read().unwrap().clone();
+    let seen_snapshot = state.seen_cids.read().unwrap().clone();
+    let ghost = req.ghost.unwrap_or(false);
+
+    let opts = ubl_runtime::RunOpts {
+        prev_tip: prev_tip.as_deref(),
+        ghost,
+        keys: &state.keys,
+        seen: Some(&seen_snapshot),
+    };
+
+    match ubl_runtime::run_with_receipts(&req.manifest, &req.vars, &cfg, &opts) {
         Ok(run) => {
-            // Store all receipts in the in-memory receipt store
-            {
+            // Store receipts + update seen_cids + update last_tip (unless ghost)
+            if !run.ghost {
                 let mut store = state.receipt_chain.write().unwrap();
                 store.insert(run.wa.body_cid.clone(), serde_json::to_value(&run.wa).unwrap());
                 if let Some(ref tr) = run.transition {
@@ -201,18 +221,29 @@ pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<Exec
                 store.insert(run.wf.body_cid.clone(), serde_json::to_value(&run.wf).unwrap());
             }
 
-            // Also run the original execute for artifacts
-            let exec_res = ubl_runtime::execute(&req.manifest, &req.vars, &cfg);
-            let (artifacts, dimension_stack) = match exec_res {
-                Ok(r) => (serde_json::to_value(r.artifacts).unwrap_or(json!(null)), r.dimension_stack),
-                Err(_) => (json!(null), vec![]),
-            };
+            // Always track seen_cids (even ghost) for idempotency
+            {
+                let mut seen = state.seen_cids.write().unwrap();
+                seen.insert(run.wa.body_cid.clone());
+                if let Some(ref tr) = run.transition {
+                    seen.insert(tr.body_cid.clone());
+                }
+                seen.insert(run.wf.body_cid.clone());
+            }
+
+            // Update tip
+            *state.last_tip.write().unwrap() = Some(run.tip_cid.clone());
+
+            // Get artifacts from the WF body (already computed inside run_with_receipts)
+            let decision = run.wf.body.get("decision").cloned().unwrap_or(json!(null));
+            let dimension_stack = run.wf.body.get("dimension_stack").cloned().unwrap_or(json!([]));
 
             let resp = json!({
                 "cid": run.tip_cid,
                 "tip_cid": run.tip_cid,
-                "artifacts": artifacts,
+                "decision": decision,
                 "dimension_stack": dimension_stack,
+                "ghost": run.ghost,
                 "receipts": {
                     "wa": run.wa,
                     "transition": run.transition,
@@ -222,9 +253,17 @@ pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<Exec
             });
             (StatusCode::OK, Json(resp)).into_response()
         }
-        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": "execute_failed",
-            "detail": e.to_string()
-        }))).into_response(),
+        Err(e) => {
+            let detail = e.to_string();
+            let status = if detail.contains("duplicate body_cid") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            (status, Json(json!({
+                "error": "execute_failed",
+                "detail": detail
+            }))).into_response()
+        }
     }
 }

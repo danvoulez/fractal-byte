@@ -2,13 +2,28 @@ pub mod api;
 
 use axum::{routing::{get, post}, Json, Router};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppState {
     pub transition_receipts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     pub receipt_chain: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    pub seen_cids: Arc<RwLock<HashSet<String>>>,
+    pub keys: Arc<ubl_runtime::KeyRing>,
+    pub last_tip: Arc<RwLock<Option<String>>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            transition_receipts: Default::default(),
+            receipt_chain: Default::default(),
+            seen_cids: Default::default(),
+            keys: Arc::new(ubl_runtime::KeyRing::dev()),
+            last_tip: Default::default(),
+        }
+    }
 }
 
 pub fn app() -> Router {
