@@ -1,0 +1,12 @@
+
+[workspace]
+members = [
+  "crates/ubl_ai_nrf1",
+  "crates/ubl_ledger",
+  "crates/ubl_receipt",
+  "crates/ubl_did",
+  "crates/ubl_config",
+  "crates/ubl_runtime",
+  "services/ubl_gate",
+]
+resolver = "2"

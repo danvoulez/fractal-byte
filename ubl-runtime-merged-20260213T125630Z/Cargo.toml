@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/ubl_tdln", "services/ubl_tdln_svc"]
+resolver = "2"

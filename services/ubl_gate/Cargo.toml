@@ -1,0 +1,32 @@
+
+[package]
+name = "ubl_gate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.7", features = ["json", "macros"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cid = { version = "0.11", features = ["serde-codec", "std"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+ubl_ai_nrf1 = { path = "../../crates/ubl_ai_nrf1" }
+ubl_ledger = { path = "../../crates/ubl_ledger" }
+ubl_receipt = { path = "../../crates/ubl_receipt" }
+ubl_did = { path = "../../crates/ubl_did" }
+ubl_config = { path = "../../crates/ubl_config" }
+ubl_runtime = { path = "../../crates/ubl_runtime" }
+hex = "0.4"
+base64 = "0.22"
+
+[features]
+test-helpers = []
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+base64 = "0.22"
+hex = "0.4"
