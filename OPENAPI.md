@@ -76,6 +76,33 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecuteError" }
 
+  # ── Execute RB-VM (chip) ──────────────────────────────────────
+  /v1/execute/rb:
+    post:
+      summary: Executa chip RB-VM determinístico (TLV bytecode + fuel metering)
+      operationId: postExecuteRb
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExecuteRbRequest" }
+      responses:
+        "200":
+          description: Chip executado com sucesso
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecuteRbResponse" }
+        "400":
+          description: Base64 inválido ou chip malformado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Falha de execução (policy deny, fuel exhausted, type mismatch)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecuteError" }
+
   # ── Certify ────────────────────────────────────────────────────
   /v1/certify:
     post:
@@ -236,6 +263,26 @@ components:
         error: { type: string, example: "execute_failed" }
         detail: { type: string, example: "policy deny" }
 
+    # ── Execute RB-VM ───────────────────────────────────────────
+    ExecuteRbRequest:
+      type: object
+      required: [chip_b64, inputs]
+      properties:
+        chip_b64: { type: string, description: "TLV bytecode do chip, codificado em base64" }
+        inputs:
+          type: array
+          items: { type: object }
+          description: "JSON values que serão gravados no CAS como inputs do chip"
+        ghost: { type: boolean, default: false, description: "Se true, RC sai com ghost:true" }
+        fuel: { type: integer, default: 50000, description: "Limite de fuel (cada opcode debita 1+)" }
+    ExecuteRbResponse:
+      type: object
+      required: [steps, fuel_used]
+      properties:
+        rc_cid: { type: string, nullable: true, description: "b3:<hex64> — CID do Receipt emitido (null se chip não emitiu EmitRc)" }
+        steps: { type: integer, description: "Número de instruções executadas" }
+        fuel_used: { type: integer, description: "Fuel consumido" }
+
     # ── Manifest (runtime) ──────────────────────────────────────
     Manifest:
       type: object
@@ -313,6 +360,7 @@ components:
 | `/healthz` | GET | ✅ | ✅ |
 | `/v1/ingest` | POST | ✅ | ✅ |
 | `/v1/execute` | POST | ✅ | ✅ |
+| `/v1/execute/rb` | POST | ✅ | ✅ |
 | `/v1/certify` | POST | ✅ | ✅ |
 | `/v1/receipt/:cid` | GET | ✅ | ✅ |
 | `/v1/resolve` | POST | ✅ | ✅ |
