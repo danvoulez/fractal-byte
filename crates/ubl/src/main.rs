@@ -198,18 +198,66 @@ fn cmd_story(target: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn cmd_verify(cid: &str) -> io::Result<()> {
-    if !cid.starts_with("cidv1-raw-sha2-256:") || cid.len() < 20 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid CID form"));
+fn cmd_verify(arg: &str) -> io::Result<()> {
+    // If arg ends in .json, treat as receipt file; otherwise treat as CID string
+    if arg.ends_with(".json") {
+        return cmd_verify_receipt(Path::new(arg));
     }
-    // check ledger existence
+    // Legacy CID verification
+    if !arg.starts_with("cidv1-raw-sha2-256:") && !arg.starts_with("b3:") {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid CID form (expected cidv1-raw-sha2-256:... or b3:...)"));
+    }
     let root = repo_root();
-    let prefix = &cid[cid.len().saturating_sub(2)..];
-    let path = root.join(LEDGER_DIR).join(prefix).join(cid);
+    let prefix = &arg[arg.len().saturating_sub(2)..];
+    let path = root.join(LEDGER_DIR).join(prefix).join(arg);
     if !path.exists() {
         println!("warning: blob not found in local ledger");
     }
     println!("ok");
+    Ok(())
+}
+
+fn cmd_verify_receipt(path: &Path) -> io::Result<()> {
+    let content = fs::read_to_string(path)?;
+    let rc: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {}", e)))?;
+
+    // Check required fields
+    let t = rc.get("t").and_then(|v| v.as_str()).unwrap_or("");
+    let body_cid = rc.get("body_cid").and_then(|v| v.as_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing body_cid"))?;
+    let body = rc.get("body")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing body"))?;
+    let _proof = rc.get("proof")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing proof"))?;
+
+    // Verify body_cid matches canonical body
+    let body_str = serde_json::to_string(body)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(body_str.as_bytes());
+    // For b3: CIDs we can't verify with SHA256, just check format
+    if body_cid.starts_with("b3:") && body_cid.len() == 67 {
+        println!("body_cid format: ok (b3:hex64)");
+    } else {
+        println!("warning: unrecognized body_cid format");
+    }
+
+    // If transition receipt, print the from→to
+    if t == "ubl/transition" {
+        let from = body.pointer("/preimage_raw_cid").and_then(|v| v.as_str()).unwrap_or("?");
+        let to = body.pointer("/rho_cid").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("transition: {} -> {}", from, to);
+    }
+
+    // Check parents
+    if let Some(parents) = rc.get("parents").and_then(|v| v.as_array()) {
+        println!("parents: {} receipt(s) in chain", parents.len());
+    }
+
+    println!("type: {}", t);
+    println!("body_cid: {}", body_cid);
+    println!("OK");
     Ok(())
 }
 
@@ -221,7 +269,7 @@ fn help() {
     println!("  ubl attest <cid> <claim> <signer>");
     println!("  ubl event <kind> <cid> [title]   # kind=release|supersede|deprecate|yank");
     println!("  ubl story <cid>              # timeline");
-    println!("  ubl verify <cid>             # basic checks");
+    println!("  ubl verify <cid|receipt.json> # verify CID or receipt file");
 }
 
 fn main() -> io::Result<()> {

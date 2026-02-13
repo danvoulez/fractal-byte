@@ -187,15 +187,39 @@ pub async fn get_transition(State(state): State<AppState>, Path(cid): Path<Strin
     }
 }
 
-pub async fn execute_runtime(Json(req): Json<ExecRequest>) -> impl IntoResponse {
+pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<ExecRequest>) -> impl IntoResponse {
     let cfg = ubl_runtime::ExecuteConfig { version: "0.1.0".into() };
-    match ubl_runtime::execute(&req.manifest, &req.vars, &cfg) {
-        Ok(res) => {
-            let resp = ExecResponse {
-                cid: res.cid,
-                artifacts: serde_json::to_value(res.artifacts).unwrap_or(json!(null)),
-                dimension_stack: res.dimension_stack,
+    match ubl_runtime::run_with_receipts(&req.manifest, &req.vars, &cfg, None) {
+        Ok(run) => {
+            // Store all receipts in the in-memory receipt store
+            {
+                let mut store = state.receipt_chain.write().unwrap();
+                store.insert(run.wa.body_cid.clone(), serde_json::to_value(&run.wa).unwrap());
+                if let Some(ref tr) = run.transition {
+                    store.insert(tr.body_cid.clone(), serde_json::to_value(tr).unwrap());
+                }
+                store.insert(run.wf.body_cid.clone(), serde_json::to_value(&run.wf).unwrap());
+            }
+
+            // Also run the original execute for artifacts
+            let exec_res = ubl_runtime::execute(&req.manifest, &req.vars, &cfg);
+            let (artifacts, dimension_stack) = match exec_res {
+                Ok(r) => (serde_json::to_value(r.artifacts).unwrap_or(json!(null)), r.dimension_stack),
+                Err(_) => (json!(null), vec![]),
             };
+
+            let resp = json!({
+                "cid": run.tip_cid,
+                "tip_cid": run.tip_cid,
+                "artifacts": artifacts,
+                "dimension_stack": dimension_stack,
+                "receipts": {
+                    "wa": run.wa,
+                    "transition": run.transition,
+                    "wf": run.wf,
+                },
+                "url": format!("{}/v1/receipt/{}", BASE_URL.as_str(), run.tip_cid),
+            });
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({

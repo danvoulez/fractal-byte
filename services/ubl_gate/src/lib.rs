@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone, Default)]
 pub struct AppState {
     pub transition_receipts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    pub receipt_chain: Arc<RwLock<HashMap<String, serde_json::Value>>>,
 }
 
 pub fn app() -> Router {
