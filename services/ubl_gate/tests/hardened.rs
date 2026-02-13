@@ -379,6 +379,72 @@ async fn jws_receipt_has_valid_structure() {
     assert_eq!(sig_bytes.len(), 64, "Ed25519 signature must be 64 bytes");
 }
 
+// ── AuthN/Z tests ───────────────────────────────────────────────
+
+async fn setup_auth_enabled() -> (String, Client, tokio::task::JoinHandle<()>) {
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    let mut state = ubl_gate::AppState::default();
+    state.auth_disabled = false;
+    let app = ubl_gate::app_with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{}", addr);
+    let http = Client::new();
+    (base, http, handle)
+}
+
+#[tokio::test]
+async fn auth_rejects_missing_token() {
+    let (base, http, _h) = setup_auth_enabled().await;
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .body(r#"{"payload":{"a":1}}"#)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401, "missing token must be rejected");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("missing"));
+}
+
+#[tokio::test]
+async fn auth_rejects_invalid_token() {
+    let (base, http, _h) = setup_auth_enabled().await;
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer bad-token-999")
+        .body(r#"{"payload":{"a":1}}"#)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401, "invalid token must be rejected");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("invalid"));
+}
+
+#[tokio::test]
+async fn auth_accepts_dev_token() {
+    let (base, http, _h) = setup_auth_enabled().await;
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer ubl-dev-token-001")
+        .body(r#"{"payload":{"a":1}}"#)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "dev token must be accepted");
+}
+
+#[tokio::test]
+async fn auth_public_paths_skip_auth() {
+    let (base, http, _h) = setup_auth_enabled().await;
+    // healthz should work without token
+    let resp = http.get(format!("{}/healthz", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "healthz is public");
+    // .well-known/did.json should work without token
+    let resp = http.get(format!("{}/.well-known/did.json", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "did.json is public");
+}
+
 // ── Healthz ──────────────────────────────────────────────────────
 
 #[tokio::test]

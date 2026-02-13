@@ -3,6 +3,10 @@
 > Escopo: **todos** os endpoints públicos do **ubl-gate** (`:3000`).
 > Caminhos com `:cid` usam sintaxe do roteador (matchit/axum).
 > Este documento reflete **exatamente** o que está implementado no código.
+>
+> **Receipt-first**: every mutation returns receipts (WA → Transition → WF).
+> Failures produce DENY WF receipts (HTTP 200), never 422/500.
+> Replay of identical inputs returns HTTP 409 CONFLICT.
 
 ```yaml
 openapi: 3.1.0
@@ -57,8 +61,10 @@ paths:
   # ── Execute (runtime) ──────────────────────────────────────────
   /v1/execute:
     post:
-      summary: Executa manifest (parse → policy → render) via ubl_runtime
+      summary: Receipt-first execute — manifest (parse → policy → render) via ubl_runtime
       operationId: postExecute
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -66,15 +72,22 @@ paths:
             schema: { $ref: "#/components/schemas/ExecuteRequest" }
       responses:
         "200":
-          description: Execução concluída
+          description: >
+            Execution completed. On success: decision=ALLOW.
+            On failure (policy deny, codec error): decision=DENY with WF receipt.
+            Both cases return 200 with full receipt chain.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecuteResponse" }
-        "422":
-          description: Falha de execução (policy deny, codec error, binding error)
+        "409":
+          description: Duplicate request (idempotency replay). Same pipeline+inputs already executed.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ExecuteError" }
+              schema: { $ref: "#/components/schemas/Error" }
+        "415":
+          description: Missing or wrong Content-Type (must be application/json)
+        "401":
+          description: Missing or invalid Bearer token (when auth enabled)
 
   # ── Execute RB-VM (chip) ──────────────────────────────────────
   /v1/execute/rb:
@@ -269,22 +282,25 @@ components:
         vars:
           type: object
           additionalProperties: true
-          description: "Variáveis para binding D8 (BTreeMap<String, Value>)"
+          description: "Variables for binding (BTreeMap<String, Value>)"
+        ghost:
+          type: boolean
+          default: false
+          description: "Ghost mode: receipts emitted with observability.ghost=true, ledger writes skipped"
     ExecuteResponse:
       type: object
-      required: [cid, artifacts, dimension_stack]
+      required: [tip_cid, decision, ghost, receipts]
       properties:
-        cid: { type: string, description: "b3:<hex64> — BLAKE3 do output canonicalizado" }
-        artifacts: { type: object, description: "Artefatos produzidos pelo runtime" }
-        dimension_stack:
-          type: array
-          items: { type: string }
-          example: ["parse", "policy", "render"]
-    ExecuteError:
-      type: object
-      properties:
-        error: { type: string, example: "execute_failed" }
-        detail: { type: string, example: "policy deny" }
+        tip_cid: { type: string, description: "b3:<hex64> — CID of the WF receipt body (chain tip)" }
+        decision: { type: string, enum: [ALLOW, DENY], description: "Pipeline decision" }
+        ghost: { type: boolean, description: "Whether this was a ghost-mode execution" }
+        receipts:
+          type: object
+          required: [wa, wf]
+          properties:
+            wa: { $ref: "#/components/schemas/Receipt" }
+            transition: { $ref: "#/components/schemas/Receipt" }
+            wf: { $ref: "#/components/schemas/Receipt" }
 
     # ── Execute RB-VM ───────────────────────────────────────────
     ExecuteRbRequest:
@@ -405,15 +421,68 @@ components:
           type: array
           items: { type: string }
 
+    # ── Receipt (unified envelope) ─────────────────────────────
+    Receipt:
+      type: object
+      required: [t, parents, body, body_cid, proof]
+      properties:
+        t: { type: string, enum: ["ubl/wa", "ubl/transition", "ubl/wf", "ubl/attestation"] }
+        parents: { type: array, items: { type: string }, description: "CIDs of parent receipts (chaining)" }
+        body: { type: object, description: "Stage-specific content" }
+        body_cid: { type: string, pattern: "^b3:[0-9a-f]{64}$" }
+        proof: { $ref: "#/components/schemas/JwsDetached" }
+        observability:
+          nullable: true
+          type: object
+          properties:
+            ghost: { type: boolean, nullable: true }
+            logline: { $ref: "#/components/schemas/Logline" }
+
+    # ── Logline (LLM-first observability) ─────────────────────
+    Logline:
+      type: object
+      required: [who, actor_did, what, where, when_iso, why, context_id, version]
+      properties:
+        who: { type: string, description: "Human-readable actor name" }
+        actor_did: { type: string, description: "DID of the acting entity" }
+        what: { type: string, description: "Stage-specific action label" }
+        where: { type: string, description: "Execution context location" }
+        when_iso: { type: string, format: date-time, description: "ISO 8601 timestamp" }
+        why: { type: string, description: "Reason for the action" }
+        context_id: { type: string, description: "Correlation ID for tracing" }
+        version: { type: string, example: "0.1.0" }
+
     # ── Error ───────────────────────────────────────────────────
     Error:
       type: object
       properties:
         error: { type: string }
         detail: { type: string }
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Bearer token authentication. Disabled by default in dev (UBL_AUTH_DISABLED=1).
+        Public paths (/healthz, /.well-known/did.json) do not require auth.
+        Dev token: ubl-dev-token-001
 ```
 
 ---
+
+## Compatibility
+
+All receipt-first endpoints follow these invariants:
+
+- **Every mutation returns receipts** — WA, Transition, WF chain
+- **Failures produce DENY WF receipts** (HTTP 200), never 422/500
+- **Replay returns 409 CONFLICT** — idempotency via `pipeline:inputs_raw_cid`
+- **Ghost mode** — `ghost: true` in request → `observability.ghost: true` on all receipts, ledger skipped
+- **Strong chaining** — `parents[0] == prev_tip` when chain exists
+- **Schema validated** — every receipt passes `validate_receipt()` before return
+- **Auth** — Bearer token required when `UBL_AUTH_DISABLED != 1`
+- **Edge protections** — 1 MiB body limit, 30s timeout, `application/json` required on POST
 
 ## Cobertura
 
