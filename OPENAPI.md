@@ -1,25 +1,45 @@
 # UBL • OpenAPI (Esqueleto 3.1)
 
-> Escopo: endpoints públicos do **ubl-gate** e utilitários de leitura (CID/DID/recibo).
-> Nota: caminhos com `:cid` usam sintaxe do roteador (matchit/axum).
+> Escopo: **todos** os endpoints públicos do **ubl-gate** (`:3000`).
+> Caminhos com `:cid` usam sintaxe do roteador (matchit/axum).
+> Este documento reflete **exatamente** o que está implementado no código.
 
 ```yaml
 openapi: 3.1.0
 info:
   title: UBL Gate API
-  version: "1.0.0"
+  version: "0.1.0"
+  contact:
+    email: dan@ubl.agency
   description: >
     Edge/API do Universal Business Ledger. Tudo é chip (exceto o gate).
     Recibos são a imagem/persistência/linha do tempo (CID/DID/JWS).
 
 servers:
-  - url: https://api.ubl.foundation
   - url: http://localhost:3000
+    description: Local dev
 
 paths:
+
+  # ── Health ───────────────────────────────────────────────────────
+  /healthz:
+    get:
+      summary: Liveness check
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Serviço ativo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+
+  # ── Ingest ──────────────────────────────────────────────────────
   /v1/ingest:
     post:
-      summary: Create Write-Ahead (WA) e opcionalmente certificar (recibo antecipado)
+      summary: Encapsula JSON em NRF, grava no ledger, opcionalmente emite recibo
       operationId: postIngest
       requestBody:
         required: true
@@ -28,16 +48,16 @@ paths:
             schema: { $ref: "#/components/schemas/IngestRequest" }
       responses:
         "200":
-          description: WA aceito
+          description: Conteúdo aceito e gravado
           content:
             application/json:
               schema: { $ref: "#/components/schemas/IngestResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "409": { description: CID já existe (idempotente) }
 
+  # ── Execute (runtime) ──────────────────────────────────────────
   /v1/execute:
     post:
-      summary: Executa (parse → policy → render), grava WF e recibo JWS
+      summary: Executa manifest (parse → policy → render) via ubl_runtime
       operationId: postExecute
       requestBody:
         required: true
@@ -50,54 +70,103 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExecuteResponse" }
-        "403": { description: Policy DENY com recibo }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "422":
+          description: Falha de execução (policy deny, codec error, binding error)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExecuteError" }
 
+  # ── Certify ────────────────────────────────────────────────────
+  /v1/certify:
+    post:
+      summary: Emite recibo JWS para um CID já ingerido
+      operationId: postCertify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cid]
+              properties:
+                cid: { type: string, description: "CID do conteúdo a certificar" }
+      responses:
+        "200":
+          description: Recibo emitido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  receipt: { type: string, description: "JWS compact (header.payload.signature)" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { description: "Conteúdo não encontrado no ledger" }
+
+  # ── Receipt ────────────────────────────────────────────────────
   /v1/receipt/:cid:
     get:
-      summary: Retorna recibo JWS (ALLOW/DENY) com narrativa LLM-first
+      summary: Retorna recibo JWS para um CID
       operationId: getReceipt
       parameters:
         - { name: cid, in: path, required: true, schema: { type: string } }
       responses:
         "200":
-          description: Recibo JWS (application/jose)
+          description: Recibo JWS
           content:
-            application/jose:
-              schema: { type: string, description: "Compact/JSON JWS" }
+            application/jose+json:
+              schema: { type: string, description: "JWS compact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  /cid/:cid:
-    get:
-      summary: Retorna bytes NRF (ρ) do objeto
-      operationId: getCidRaw
-      parameters:
-        - { name: cid, in: path, required: true, schema: { type: string } }
+  # ── Resolve ────────────────────────────────────────────────────
+  /v1/resolve:
+    post:
+      summary: Resolve um DID ou CID para seus links e metadados
+      operationId: postResolve
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string, description: "did:cid:... ou CID string" }
       responses:
         "200":
-          description: Bytes NRF
+          description: Documento resolvido
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  links:
+                    type: array
+                    items: { type: string }
+
+  # ── CID raw bytes ──────────────────────────────────────────────
+  /cid/:cid:
+    get:
+      summary: Retorna bytes NRF (ρ) do objeto; sufixo .json retorna view JSON
+      operationId: getCid
+      parameters:
+        - { name: cid, in: path, required: true, schema: { type: string }, description: "CID puro ou CID.json" }
+      responses:
+        "200":
+          description: Bytes NRF (sem .json) ou JSON view (com .json)
           content:
             application/x-nrf:
               schema: { type: string, format: binary }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /cid/:cid.json:
-    get:
-      summary: Visualização JSON do NRF (decode); fallback base64 se falhar
-      operationId: getCidJson
-      parameters:
-        - { name: cid, in: path, required: true, schema: { type: string } }
-      responses:
-        "200":
-          description: View JSON
-          content:
             application/json:
               schema: { $ref: "#/components/schemas/JsonView" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  # ── DID Document ───────────────────────────────────────────────
   /.well-known/did.json:
     get:
-      summary: DID Document do emissor (verifying key)
+      summary: DID Document do emissor (Ed25519 verifying key)
       operationId: getWellKnownDid
       responses:
         "200":
@@ -106,106 +175,114 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DidDocument" }
 
-  /v1/search/receipts:
-    get:
-      summary: Busca recibos por filtros (cid, actor, time, policy, space)
-      operationId: searchReceipts
-      parameters:
-        - { name: cid, in: query, required: false, schema: { type: string } }
-        - { name: actor, in: query, required: false, schema: { type: string } }
-        - { name: space, in: query, required: false, schema: { type: string } }
-        - { name: policy, in: query, required: false, schema: { type: string, enum: ["ALLOW","DENY"] } }
-        - { name: time_from, in: query, required: false, schema: { type: string, format: date-time } }
-        - { name: time_to, in: query, required: false, schema: { type: string, format: date-time } }
-      responses:
-        "200":
-          description: Lista paginada de recibos
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ReceiptSearchResponse" }
-
+# ══════════════════════════════════════════════════════════════════
 components:
   responses:
     BadRequest:
-      description: Erro de validação
+      description: Erro de validação (ρ violation, CID inválido, JSON malformado)
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     NotFound:
-      description: Recurso não encontrado
+      description: Recurso não encontrado no ledger
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+
+    # ── Ingest ──────────────────────────────────────────────────
     IngestRequest:
       type: object
       required: [payload]
       properties:
-        payload: { description: "JSON a encapsular em NRF", type: object }
-        certify: { type: boolean, default: false, description: "Se true, emite recibo antecipado" }
-        space: { type: string }
-        actor: { type: string }
+        payload: { type: object, description: "JSON a encapsular em NRF (ρ-validated)" }
+        certify: { type: boolean, default: false, description: "Se true, emite recibo JWS imediatamente" }
     IngestResponse:
       type: object
-      required: [cid, url, content_type, bytes_len]
+      required: [cid, did, bytes_len, content_type, url, receipt_url]
       properties:
-        cid: { type: string }
-        did: { type: string }
-        url: { type: string }
-        receipt_url: { type: string }
-        content_type: { type: string, example: "application/x-nrf" }
+        cid: { type: string, example: "bafkrei..." }
+        did: { type: string, example: "did:cid:bafkrei..." }
         bytes_len: { type: integer }
+        content_type: { type: string, example: "application/x-nrf" }
+        url: { type: string, example: "http://localhost:3000/cid/bafkrei..." }
+        receipt_url: { type: string, example: "http://localhost:3000/v1/receipt/bafkrei..." }
 
+    # ── Execute ─────────────────────────────────────────────────
     ExecuteRequest:
       type: object
-      required: [cid]
+      required: [manifest, vars]
       properties:
-        cid: { type: string, description: "CID previamente ingerido (WA)" }
-        policy_set: { type: string, description: "Conjunto de políticas a aplicar" }
-        vars: { type: object, additionalProperties: true, description: "Variáveis para binding D8" }
+        manifest:
+          $ref: "#/components/schemas/Manifest"
+        vars:
+          type: object
+          additionalProperties: true
+          description: "Variáveis para binding D8 (BTreeMap<String, Value>)"
     ExecuteResponse:
       type: object
-      required: [cid, decision, receipt_url]
+      required: [cid, artifacts, dimension_stack]
       properties:
-        cid: { type: string }
-        decision: { type: string, enum: ["ALLOW", "DENY"] }
-        receipt_url: { type: string }
-
-    JsonView:
+        cid: { type: string, description: "b3:<hex64> — BLAKE3 do output canonicalizado" }
+        artifacts: { type: object, description: "Artefatos produzidos pelo runtime" }
+        dimension_stack:
+          type: array
+          items: { type: string }
+          example: ["parse", "policy", "render"]
+    ExecuteError:
       type: object
       properties:
-        decoded: { type: object, description: "JSON decodificado do NRF" }
+        error: { type: string, example: "execute_failed" }
+        detail: { type: string, example: "policy deny" }
+
+    # ── Manifest (runtime) ──────────────────────────────────────
+    Manifest:
+      type: object
+      required: [pipeline, in_grammar, out_grammar, policy]
+      properties:
+        pipeline: { type: string }
+        in_grammar:
+          $ref: "#/components/schemas/Grammar"
+        out_grammar:
+          $ref: "#/components/schemas/Grammar"
+        policy:
+          type: object
+          properties:
+            allow: { type: boolean }
+    Grammar:
+      type: object
+      required: [inputs, mappings, output_from]
+      properties:
+        inputs:
+          type: object
+          additionalProperties: { type: string }
+        mappings:
+          type: array
+          items:
+            type: object
+            properties:
+              from: { type: string }
+              codec: { type: string, description: "base64.decode | (extensível)" }
+              to: { type: string }
+        output_from: { type: string }
+
+    # ── JSON View ───────────────────────────────────────────────
+    JsonView:
+      type: object
+      description: "Decode NRF → JSON; fallback base64 se decode falhar"
+      properties:
+        decoded: { type: object, description: "JSON decodificado do NRF (quando sucesso)" }
+        cid: { type: string }
+        content_type: { type: string }
         nrf_base64: { type: string, description: "Base64 do payload bruto (fallback)" }
         note: { type: string }
 
-    Receipt:
-      type: object
-      required: [jws, narrative, links]
-      properties:
-        jws: { type: string, description: "Assinatura JWS compact ou JSON" }
-        narrative:
-          type: object
-          properties:
-            kind: { type: string, example: "ubl-receipt" }
-            version: { type: string, example: "1.0.0" }
-            time: { type: string, format: date-time }
-            actor: { type: string }
-            space: { type: string }
-            rho: { type: object, additionalProperties: true }
-            decision: { type: string, enum: ["ALLOW","DENY"] }
-            story: { type: string, description: "Resumo LLM-first do que ocorreu" }
-        links:
-          type: object
-          properties:
-            preimage_cid: { type: string }
-            write_ahead_cid: { type: string }
-            write_after_cid: { type: string }
-
+    # ── DID Document ────────────────────────────────────────────
     DidDocument:
       type: object
       properties:
-        id: { type: string }
+        id: { type: string, example: "did:key:z6Mk..." }
         verificationMethod:
           type: array
           items:
@@ -215,19 +292,30 @@ components:
               type: { type: string, example: "Ed25519VerificationKey2020" }
               controller: { type: string }
               publicKeyMultibase: { type: string }
-
-    ReceiptSearchResponse:
-      type: object
-      properties:
-        items:
+        assertionMethod:
           type: array
-          items: { $ref: "#/components/schemas/Receipt" }
-        next_page_token: { type: string, nullable: true }
+          items: { type: string }
 
+    # ── Error ───────────────────────────────────────────────────
     Error:
       type: object
       properties:
-        code: { type: string }
-        message: { type: string }
-        details: { type: object }
+        error: { type: string }
+        detail: { type: string }
 ```
+
+---
+
+## Cobertura
+
+| Endpoint | Método | Implementado | Testado |
+|----------|--------|:---:|:---:|
+| `/healthz` | GET | ✅ | ✅ |
+| `/v1/ingest` | POST | ✅ | ✅ |
+| `/v1/execute` | POST | ✅ | ✅ |
+| `/v1/certify` | POST | ✅ | ✅ |
+| `/v1/receipt/:cid` | GET | ✅ | ✅ |
+| `/v1/resolve` | POST | ✅ | ✅ |
+| `/cid/:cid` | GET | ✅ | ✅ |
+| `/cid/:cid.json` | GET | ✅ | ✅ |
+| `/.well-known/did.json` | GET | ✅ | ✅ |
