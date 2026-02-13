@@ -95,6 +95,7 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
     let cfg = VmConfig {
         fuel_limit: req.fuel.unwrap_or(50_000),
         ghost,
+        trace: false,
     };
 
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);

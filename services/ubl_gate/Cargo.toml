@@ -19,6 +19,8 @@ ubl_receipt = { path = "../../crates/ubl_receipt" }
 ubl_did = { path = "../../crates/ubl_did" }
 ubl_config = { path = "../../crates/ubl_config" }
 ubl_runtime = { path = "../../crates/ubl_runtime" }
+rb_vm = { path = "../../crates/rb_vm" }
+blake3 = "1"
 hex = "0.4"
 base64 = "0.22"
 

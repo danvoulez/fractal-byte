@@ -103,7 +103,7 @@ fn run_chip(chip: &[u8], inputs_json: &[&str]) -> Result<VmOutcome, ExecError> {
     let canon = NaiveCanon;
 
     let input_cids: Vec<Cid> = inputs_json.iter().map(|j| cas.put(j.as_bytes())).collect();
-    let cfg = VmConfig { fuel_limit: 50_000, ghost: false };
+    let cfg = VmConfig { fuel_limit: 50_000, ghost: false, trace: false };
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
     vm.run(&code)
 }
@@ -115,7 +115,7 @@ fn run_chip_with_fuel(chip: &[u8], inputs_json: &[&str], fuel: u64) -> Result<Vm
     let canon = NaiveCanon;
 
     let input_cids: Vec<Cid> = inputs_json.iter().map(|j| cas.put(j.as_bytes())).collect();
-    let cfg = VmConfig { fuel_limit: fuel, ghost: false };
+    let cfg = VmConfig { fuel_limit: fuel, ghost: false, trace: false };
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
     vm.run(&code)
 }
@@ -127,7 +127,7 @@ fn run_chip_ghost(chip: &[u8], inputs_json: &[&str]) -> Result<VmOutcome, ExecEr
     let canon = NaiveCanon;
 
     let input_cids: Vec<Cid> = inputs_json.iter().map(|j| cas.put(j.as_bytes())).collect();
-    let cfg = VmConfig { fuel_limit: 50_000, ghost: true };
+    let cfg = VmConfig { fuel_limit: 50_000, ghost: true, trace: false };
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
     vm.run(&code)
 }
@@ -332,7 +332,7 @@ fn law5_invalid_payload_const_i64() {
     let cas = MemCas::new();
     let signer = FixedSigner::new();
     let canon = NaiveCanon;
-    let cfg = VmConfig { fuel_limit: 50_000, ghost: false };
+    let cfg = VmConfig { fuel_limit: 50_000, ghost: false, trace: false };
     let mut vm = Vm::new(cfg, cas, &signer, canon, vec![]);
     let result = vm.run(&code);
     assert!(matches!(result, Err(ExecError::InvalidPayload(_))), "Law 5: bad ConstI64 payload");

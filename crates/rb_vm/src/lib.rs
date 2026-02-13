@@ -14,5 +14,5 @@ pub mod providers;
 pub mod canon;
 
 pub use opcode::Opcode;
-pub use exec::{Vm, VmConfig, VmOutcome, Fuel, ExecError, CasProvider, SignProvider};
+pub use exec::{Vm, VmConfig, VmOutcome, Fuel, ExecError, CasProvider, SignProvider, TraceStep};
 pub use types::{Value, Cid, RcPayload};

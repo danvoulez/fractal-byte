@@ -1,7 +1,0 @@
-[workspace]
-members = [
-    "crates/rb_vm",
-    "crates/rb_vm_disasm",
-    "crates/rb_vm_tests",
-]
-resolver = "2"

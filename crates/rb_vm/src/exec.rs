@@ -32,6 +32,16 @@ pub trait SignProvider {
 pub struct VmConfig {
     pub fuel_limit: Fuel,
     pub ghost: bool,
+    pub trace: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TraceStep {
+    pub step: u64,
+    pub op: String,
+    pub fuel_after: u64,
+    pub stack_depth: usize,
+    pub note: Option<String>,
 }
 
 pub struct Vm<'a, C: CasProvider, S: SignProvider, K: CanonProvider> {
@@ -45,6 +55,7 @@ pub struct Vm<'a, C: CasProvider, S: SignProvider, K: CanonProvider> {
     canon: K,
     rc_body: serde_json::Value,
     proofs: Vec<Cid>,
+    trace: Vec<TraceStep>,
 }
 
 #[derive(Debug)]
@@ -52,13 +63,14 @@ pub struct VmOutcome {
     pub rc_cid: Option<Cid>,
     pub steps: u64,
     pub fuel_used: Fuel,
+    pub trace: Vec<TraceStep>,
 }
 
 impl<'a, C: CasProvider, S: SignProvider, K: CanonProvider> Vm<'a, C, S, K> {
     pub fn new(cfg: VmConfig, cas: C, signer: &'a S, canon: K, inputs: Vec<Cid>) -> Self {
         Self{
             cfg, stack: Vec::new(), steps:0, fuel_used:0, cas, signer, canon, inputs,
-            rc_body: json!({}), proofs: Vec::new()
+            rc_body: json!({}), proofs: Vec::new(), trace: Vec::new()
         }
     }
 
@@ -80,6 +92,7 @@ impl<'a, C: CasProvider, S: SignProvider, K: CanonProvider> Vm<'a, C, S, K> {
         for ins in code {
             self.charge(1)?;
             self.steps += 1;
+            let trace_op = format!("{:?}", ins.op);
             match ins.op {
                 Opcode::ConstI64 => {
                     if ins.payload.len() != 8 { return Err(ExecError::InvalidPayload(Opcode::ConstI64)); }
@@ -174,6 +187,12 @@ impl<'a, C: CasProvider, S: SignProvider, K: CanonProvider> Vm<'a, C, S, K> {
                     // no-op here; signing is done in EmitRc using provider
                 }
                 Opcode::EmitRc => {
+                    if self.cfg.trace {
+                        self.trace.push(TraceStep {
+                            step: self.steps, op: trace_op, fuel_after: self.fuel_used,
+                            stack_depth: self.stack.len(), note: Some("emit_rc".into()),
+                        });
+                    }
                     // Build minimal RC payload
                     let payload = RcPayload{
                         subject_cid: None,
@@ -190,10 +209,16 @@ impl<'a, C: CasProvider, S: SignProvider, K: CanonProvider> Vm<'a, C, S, K> {
                     let bytes = serde_json::to_vec(&payload).unwrap(); // TODO: canon NRF
                     let _sig = self.signer.sign_jws(&bytes); // MVP: assinatura crua
                     let cid = self.cas.put(&bytes);
-                    return Ok(VmOutcome{ rc_cid: Some(cid), steps: self.steps, fuel_used: self.fuel_used });
+                    return Ok(VmOutcome{ rc_cid: Some(cid), steps: self.steps, fuel_used: self.fuel_used, trace: std::mem::take(&mut self.trace) });
                 }
             }
+            if self.cfg.trace {
+                self.trace.push(TraceStep {
+                    step: self.steps, op: trace_op, fuel_after: self.fuel_used,
+                    stack_depth: self.stack.len(), note: None,
+                });
+            }
         }
-        Ok(VmOutcome{ rc_cid: None, steps: self.steps, fuel_used: self.fuel_used })
+        Ok(VmOutcome{ rc_cid: None, steps: self.steps, fuel_used: self.fuel_used, trace: std::mem::take(&mut self.trace) })
     }
 }
