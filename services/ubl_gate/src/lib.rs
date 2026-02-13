@@ -11,6 +11,7 @@ pub fn app() -> Router {
         .route("/v1/receipt/:cid", get(api::get_receipt))
         .route("/v1/resolve", post(api::resolve))
         .route("/v1/execute", post(api::execute_runtime))
+        .route("/v1/execute/rb", post(api::execute_rb))
         .route("/cid/:cid", get(api::get_cid_dispatch))
         .route("/.well-known/did.json", get(api::well_known_did_json))
 }

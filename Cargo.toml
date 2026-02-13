@@ -8,6 +8,7 @@ members = [
   "crates/ubl_config",
   "crates/ubl_runtime",
   "crates/ubl",
+  "crates/rb_vm",
   "services/ubl_gate",
 ]
 resolver = "2"

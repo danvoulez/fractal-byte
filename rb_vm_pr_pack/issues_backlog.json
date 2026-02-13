@@ -1,0 +1,74 @@
+[
+  {
+    "title": "[Spec] Consolidar D2 (hash/CID) e propagar em código",
+    "labels": [
+      "spec",
+      "decision"
+    ],
+    "body": "Escolher BLAKE3 raw vs CIDv1/sha2-256 e alinhar runtime/VM/ledger."
+  },
+  {
+    "title": "[Core] Implementar VM stack + fuel + erros determinísticos",
+    "labels": [
+      "core"
+    ],
+    "body": "Underflow/TypeMismatch/Deny; charge por opcode."
+  },
+  {
+    "title": "[Core] TLV decoder + disassembler",
+    "labels": [
+      "core",
+      "dx"
+    ],
+    "body": "Ferramentas para inspeção de chips."
+  },
+  {
+    "title": "[Canon] Integrar canon NRF real",
+    "labels": [
+      "canon"
+    ],
+    "body": "Substituir NaiveCanon; conformance 30+ casos."
+  },
+  {
+    "title": "[Providers] CAS FS (BLAKE3) / futura S3",
+    "labels": [
+      "provider"
+    ],
+    "body": "Shard de paths; GC; content-type."
+  },
+  {
+    "title": "[Providers] Signer Ed25519 + JWS + DID",
+    "labels": [
+      "security"
+    ],
+    "body": "Assinatura compact/Detached com `kid`; resolver DID."
+  },
+  {
+    "title": "[Bridge] Engine::execute_rb + flag --engine=rb",
+    "labels": [
+      "bridge"
+    ],
+    "body": "Wire runtime → VM; mapear erros; telemetria."
+  },
+  {
+    "title": "[API] POST /v1/execute (engine=rb)",
+    "labels": [
+      "api"
+    ],
+    "body": "Validar inputs, limites, ghost; métricas HTTP."
+  },
+  {
+    "title": "[Tests] LAWS + goldens por CID",
+    "labels": [
+      "test"
+    ],
+    "body": "Determinismo, No‑IO, fuel, tipos, ghost, CID-chain, canon, assinatura, narrativa."
+  },
+  {
+    "title": "[Obs] Tracer + Narrador + Métricas",
+    "labels": [
+      "observability"
+    ],
+    "body": "Trace por passo; narrativa; prom metrics."
+  }
+]

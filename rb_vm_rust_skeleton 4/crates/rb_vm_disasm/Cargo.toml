@@ -1,0 +1,8 @@
+[package]
+name = "rb_vm_disasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rb_vm = { path = "../rb_vm" }
+anyhow = "1"

@@ -120,6 +120,48 @@ pub struct ExecResponse {
     pub dimension_stack: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ExecRbRequest {
+    pub chip_b64: String,
+    pub inputs: Vec<Value>,
+    pub ghost: Option<bool>,
+    pub fuel: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExecRbResponse {
+    pub rc_cid: Option<String>,
+    pub steps: u64,
+    pub fuel_used: u64,
+}
+
+pub async fn execute_rb(Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
+    let chip = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.chip_b64) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid base64 chip"}))).into_response(),
+    };
+    let rb_req = ubl_runtime::ExecuteRbReq {
+        chip,
+        inputs: req.inputs,
+        ghost: req.ghost,
+        fuel: req.fuel,
+    };
+    match ubl_runtime::execute_rb(&rb_req) {
+        Ok(res) => {
+            let resp = ExecRbResponse {
+                rc_cid: res.rc_cid,
+                steps: res.steps,
+                fuel_used: res.fuel_used,
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
+            "error": "execute_rb_failed",
+            "detail": e.to_string()
+        }))).into_response(),
+    }
+}
+
 pub async fn execute_runtime(Json(req): Json<ExecRequest>) -> impl IntoResponse {
     let cfg = ubl_runtime::ExecuteConfig { version: "0.1.0".into() };
     match ubl_runtime::execute(&req.manifest, &req.vars, &cfg) {

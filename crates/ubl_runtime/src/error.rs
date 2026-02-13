@@ -6,6 +6,10 @@ pub enum RuntimeError {
     Validation(String),
     #[error("binding: missing inputs: {missing:?}, available vars: {available:?}")]
     Binding { missing: Vec<String>, available: Vec<String> },
+    #[error("policy deny: {0}")]
+    PolicyDeny(String),
+    #[error("engine: {0}")]
+    Engine(String),
     #[error("serde-json: {0}")]
     Json(#[from] serde_json::Error),
 }
