@@ -1,5 +1,5 @@
 
-.PHONY: build test run race conformance validate docs docker
+.PHONY: build test run race conformance validate docs docker e2e sdk-ts sdk-py auth-smoke compat
 
 build:
 	cargo build --workspace
@@ -26,3 +26,40 @@ run:
 
 docker:
 	docker build -t ubl-registry:latest .
+
+e2e:
+	@echo "── Running e2e smoke (12 asserts) ──"
+	bash scripts/e2e.sh
+
+auth-smoke:
+	@echo "── Auth smoke: no token → 401 ──"
+	@STATUS=$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/v1/execute \
+	  -H 'content-type: application/json' -d '{}'); \
+	if [ "$$STATUS" = "401" ]; then echo "  ✓ 401 without token"; \
+	else echo "  ✗ expected 401, got $$STATUS (auth may be disabled)"; fi
+	@echo "── Auth smoke: dev token → 200/409 ──"
+	@STATUS=$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/v1/execute \
+	  -H 'authorization: Bearer ubl-dev-token-001' \
+	  -H 'content-type: application/json' \
+	  -d '{"manifest":{"pipeline":"auth-smoke","in_grammar":{"inputs":{"x":""},"mappings":[],"output_from":"x"},"out_grammar":{"inputs":{"y":""},"mappings":[],"output_from":"y"},"policy":{"allow":true}},"vars":{"x":"1"}}'); \
+	if [ "$$STATUS" = "200" ] || [ "$$STATUS" = "409" ]; then echo "  ✓ $$STATUS with dev token"; \
+	else echo "  ✗ expected 200/409, got $$STATUS"; fi
+
+sdk-ts:
+	@echo "── Generating TypeScript SDK types ──"
+	npx openapi-typescript docs/OPENAPI.md -o sdk/ts/types.ts
+	@echo "  ✓ sdk/ts/types.ts"
+
+sdk-py:
+	@echo "── Generating Python SDK ──"
+	openapi-python-client generate --path docs/OPENAPI.md --output-path sdk/py
+	@echo "  ✓ sdk/py/"
+
+compat:
+	@echo "── Compat check: OpenAPI spec version ──"
+	@grep -q 'version: "0.1.0"' docs/OPENAPI.md && echo "  ✓ spec version 0.1.0" || echo "  ✗ spec version mismatch"
+	@echo "── Compat check: receipt-first invariants ──"
+	@grep -q 'Receipt' docs/OPENAPI.md && echo "  ✓ Receipt schema present" || echo "  ✗ Receipt schema missing"
+	@grep -q 'Logline' docs/OPENAPI.md && echo "  ✓ Logline schema present" || echo "  ✗ Logline schema missing"
+	@grep -q 'bearerAuth' docs/OPENAPI.md && echo "  ✓ securitySchemes present" || echo "  ✗ securitySchemes missing"
+	@grep -q '409' docs/OPENAPI.md && echo "  ✓ 409 CONFLICT documented" || echo "  ✗ 409 missing"

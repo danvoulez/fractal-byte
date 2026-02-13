@@ -1,6 +1,6 @@
 
-use axum::{extract::{Path, State}, http::{StatusCode, header}, response::IntoResponse, Json};
-use crate::AppState;
+use axum::{extract::{Path, State}, http::{StatusCode, header}, response::IntoResponse, Json, Extension};
+use crate::{AppState, ClientInfo};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -194,8 +194,23 @@ pub struct ExecRequestFull {
     pub ghost: Option<bool>,
 }
 
-pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<ExecRequestFull>) -> impl IntoResponse {
+pub async fn execute_runtime(
+    State(state): State<AppState>,
+    client: Option<Extension<ClientInfo>>,
+    Json(req): Json<ExecRequestFull>,
+) -> impl IntoResponse {
     let cfg = ubl_runtime::ExecuteConfig { version: "0.1.0".into() };
+
+    // Kid-scope check: if client has allowed_kids, verify active signing kid
+    if let Some(Extension(ref ci)) = client {
+        let active_kid = &state.keys.active_kid;
+        if !ci.kid_allowed(active_kid) {
+            return (StatusCode::FORBIDDEN, Json(json!({
+                "error": "kid_scope_denied",
+                "detail": format!("client '{}' not authorized for kid '{}'", ci.client_id, active_kid)
+            }))).into_response();
+        }
+    }
 
     // Read prev_tip and seen_cids for chaining + idempotency
     let prev_tip = state.last_tip.read().unwrap().clone();

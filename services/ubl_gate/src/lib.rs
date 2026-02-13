@@ -30,6 +30,14 @@ pub struct ClientInfo {
     pub allowed_kids: Vec<String>,
 }
 
+impl ClientInfo {
+    /// Check if this client is allowed to use the given kid.
+    /// Empty allowed_kids means unrestricted.
+    pub fn kid_allowed(&self, kid: &str) -> bool {
+        self.allowed_kids.is_empty() || self.allowed_kids.iter().any(|k| k == kid)
+    }
+}
+
 /// In-memory token store mapping bearer tokens → client info.
 #[derive(Clone, Default)]
 pub struct TokenStore {
@@ -137,7 +145,7 @@ async fn require_json_content_type(req: Request, next: Next) -> Response {
 const PUBLIC_PATHS: &[&str] = &["/healthz", "/.well-known/did.json"];
 
 /// Middleware: require valid Bearer token on non-public paths.
-async fn require_bearer_auth(state: AppState, req: Request, next: Next) -> Response {
+async fn require_bearer_auth(state: AppState, mut req: Request, next: Next) -> Response {
     // Skip auth if disabled (dev/test mode)
     if state.auth_disabled {
         return next.run(req).await;
@@ -155,7 +163,11 @@ async fn require_bearer_auth(state: AppState, req: Request, next: Next) -> Respo
     match token {
         Some(t) => {
             match state.token_store.lookup(t) {
-                Some(_client) => next.run(req).await,
+                Some(client) => {
+                    // Inject client info into request extensions for kid-scope checks
+                    req.extensions_mut().insert(client);
+                    next.run(req).await
+                }
                 None => (
                     StatusCode::UNAUTHORIZED,
                     Json(json!({"error": "invalid bearer token"})),

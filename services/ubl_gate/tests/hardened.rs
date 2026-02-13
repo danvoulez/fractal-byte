@@ -445,6 +445,168 @@ async fn auth_public_paths_skip_auth() {
     assert_eq!(resp.status(), 200, "did.json is public");
 }
 
+// ── Kid-scope auth (403) ─────────────────────────────────────────
+
+async fn setup_auth_kid_scoped(allowed_kids: Vec<String>) -> (String, Client, tokio::task::JoinHandle<()>) {
+    use tokio::net::TcpListener;
+
+    let mut state = ubl_gate::AppState::default();
+    state.auth_disabled = false;
+    // Register a scoped token that only allows specific kids
+    state.token_store.register("scoped-token-001", ubl_gate::ClientInfo {
+        client_id: "scoped-client".into(),
+        allowed_kids,
+    });
+    let app = ubl_gate::app_with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{}", addr), Client::new(), handle)
+}
+
+#[tokio::test]
+async fn auth_kid_scope_denied_returns_403() {
+    // Token only allows "did:other#k9" but gate signs with "did:dev#k1"
+    let (base, http, _h) = setup_auth_kid_scoped(vec!["did:other#k9".into()]).await;
+    let manifest = json!({
+        "pipeline": "kid-test",
+        "in_grammar": {"inputs": {"raw_b64": ""}, "mappings": [{"from": "raw_b64", "codec": "base64.decode", "to": "raw.bytes"}], "output_from": "raw.bytes"},
+        "out_grammar": {"inputs": {"content": ""}, "mappings": [], "output_from": "content"},
+        "policy": {"allow": true}
+    });
+    let resp = http.post(format!("{}/v1/execute", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer scoped-token-001")
+        .json(&json!({"manifest": manifest, "vars": {"input_data": "aGVsbG8="}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 403, "kid out of scope must return 403");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "kid_scope_denied");
+    assert!(body["detail"].as_str().unwrap().contains("did:dev#k1"));
+}
+
+#[tokio::test]
+async fn auth_kid_scope_allowed_returns_200() {
+    // Token allows "did:dev#k1" which is the active signing kid
+    let (base, http, _h) = setup_auth_kid_scoped(vec!["did:dev#k1".into()]).await;
+    let manifest = json!({
+        "pipeline": "kid-ok",
+        "in_grammar": {"inputs": {"raw_b64": ""}, "mappings": [{"from": "raw_b64", "codec": "base64.decode", "to": "raw.bytes"}], "output_from": "raw.bytes"},
+        "out_grammar": {"inputs": {"content": ""}, "mappings": [], "output_from": "content"},
+        "policy": {"allow": true}
+    });
+    let resp = http.post(format!("{}/v1/execute", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer scoped-token-001")
+        .json(&json!({"manifest": manifest, "vars": {"input_data": "aGVsbG8="}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "kid in scope must return 200");
+}
+
+// ── Edge limit tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn body_too_large_returns_413() {
+    let (base, http, _h) = setup().await;
+    // 1 MiB + 1 byte should be rejected
+    let big_body = "x".repeat(1_048_577);
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .body(big_body)
+        .send().await.unwrap();
+    // tower-http returns 413 Payload Too Large
+    assert_eq!(resp.status(), 413, "body > 1MiB must be rejected with 413");
+}
+
+#[tokio::test]
+async fn wrong_content_type_returns_415() {
+    let (base, http, _h) = setup().await;
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "text/plain")
+        .body(r#"{"payload":{"a":1}}"#)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 415, "non-JSON content-type must be rejected with 415");
+}
+
+#[tokio::test]
+async fn missing_content_type_returns_415() {
+    let (base, http, _h) = setup().await;
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .body(r#"{"payload":{"a":1}}"#)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 415, "missing content-type on POST must be rejected with 415");
+}
+
+// ── Replay integrity test ───────────────────────────────────────
+
+#[tokio::test]
+async fn replay_returns_409_with_first_chain_intact() {
+    let (base, http, _h) = setup().await;
+    let manifest = json!({
+        "pipeline": "replay-integrity",
+        "in_grammar": {"inputs": {"raw_b64": ""}, "mappings": [{"from": "raw_b64", "codec": "base64.decode", "to": "raw.bytes"}], "output_from": "raw.bytes"},
+        "out_grammar": {"inputs": {"content": ""}, "mappings": [], "output_from": "content"},
+        "policy": {"allow": true}
+    });
+    let req_body = json!({"manifest": manifest, "vars": {"input_data": "cmVwbGF5"}});
+
+    // First call: should succeed with full receipt chain
+    let resp1 = http.post(format!("{}/v1/execute", base))
+        .json(&req_body)
+        .send().await.unwrap();
+    assert_eq!(resp1.status(), 200, "first call must succeed");
+    let body1: Value = resp1.json().await.unwrap();
+
+    // Verify chain integrity of first call
+    let wa_cid = body1["receipts"]["wa"]["body_cid"].as_str().unwrap();
+    let tr_cid = body1["receipts"]["transition"]["body_cid"].as_str().unwrap();
+    let wf_p0 = body1["receipts"]["wf"]["parents"][0].as_str().unwrap();
+    let wf_p1 = body1["receipts"]["wf"]["parents"][1].as_str().unwrap();
+    assert_eq!(wf_p0, wa_cid, "wf.parents[0] == wa.body_cid");
+    assert_eq!(wf_p1, tr_cid, "wf.parents[1] == transition.body_cid");
+    assert!(wa_cid.starts_with("b3:"), "wa.body_cid is b3:");
+    assert!(tr_cid.starts_with("b3:"), "transition.body_cid is b3:");
+    assert_eq!(body1["decision"], "ALLOW");
+
+    // Second call (replay): must return 409
+    let resp2 = http.post(format!("{}/v1/execute", base))
+        .json(&req_body)
+        .send().await.unwrap();
+    assert_eq!(resp2.status(), 409, "replay must return 409 CONFLICT");
+    let body2: Value = resp2.json().await.unwrap();
+    assert!(body2["detail"].as_str().unwrap().contains("duplicate request"));
+}
+
+// ── NEG path: policy DENY produces receipt ──────────────────────
+
+#[tokio::test]
+async fn policy_deny_produces_deny_receipt_with_chain() {
+    let (base, http, _h) = setup().await;
+    let manifest = json!({
+        "pipeline": "deny-chain-test",
+        "in_grammar": {"inputs": {"x": ""}, "mappings": [], "output_from": "x"},
+        "out_grammar": {"inputs": {"y": ""}, "mappings": [], "output_from": "y"},
+        "policy": {"allow": false}
+    });
+    let resp = http.post(format!("{}/v1/execute", base))
+        .json(&json!({"manifest": manifest, "vars": {"x": "data"}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "DENY must still return 200");
+    let body: Value = resp.json().await.unwrap();
+
+    assert_eq!(body["decision"], "DENY");
+    assert_eq!(body["receipts"]["wf"]["body"]["decision"], "DENY");
+    assert!(body["receipts"]["wf"]["body"]["reason"].as_str().unwrap().len() > 0);
+
+    // Chain integrity even on DENY
+    let wa_cid = body["receipts"]["wa"]["body_cid"].as_str().unwrap();
+    let wf_p0 = body["receipts"]["wf"]["parents"][0].as_str().unwrap();
+    assert_eq!(wf_p0, wa_cid, "DENY wf.parents[0] == wa.body_cid");
+    assert!(body["tip_cid"].as_str().unwrap().starts_with("b3:"));
+}
+
 // ── Healthz ──────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -1,0 +1,17 @@
+{
+  "tokens": [
+    {
+      "token": "ubl-dev-token-001",
+      "client_id": "dev-client",
+      "allowed_kids": [],
+      "note": "Default dev token — unrestricted kid access. Do NOT use in production."
+    },
+    {
+      "token": "ubl-staging-token-001",
+      "client_id": "staging-runner",
+      "allowed_kids": ["did:dev#k1"],
+      "note": "Staging CI runner — scoped to dev key only."
+    }
+  ],
+  "revoked": []
+}
