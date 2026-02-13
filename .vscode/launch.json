@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ubl story (exemplo)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/ubl",
+      "args": ["story", "cidv1-raw-sha2-256:..."],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

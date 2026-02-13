@@ -1,0 +1,14 @@
+{
+  "type": "event",
+  "kind": "release",
+  "subjects": [
+    "cidv1-raw-sha2-256:EXAMPLE"
+  ],
+  "metadata": {
+    "title": "v0.1.0-prototype",
+    "notes": "Prot\u00f3tipo inicial."
+  },
+  "author": "@voulezvous/release-bot",
+  "created_at": "2026-02-13T00:00:00Z",
+  "signature": "base64:TODO"
+}

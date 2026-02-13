@@ -283,9 +283,11 @@ async fn resolve_did_cid() {
 async fn full_lifecycle_separate_certify() {
     let (base, http, _h) = setup().await;
 
-    // Ingest WITHOUT certify
+    // Ingest WITHOUT certify — unique payload so CID is fresh each run
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let r: Value = http.post(format!("{}/v1/ingest", base))
-        .json(&json!({"payload": {"lifecycle": "test", "step": 1}}))
+        .json(&json!({"payload": {"lifecycle": "test", "step": 1, "nonce": nonce}}))
         .send().await.unwrap().json().await.unwrap();
     let cid = r["cid"].as_str().unwrap().to_owned();
 

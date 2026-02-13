@@ -1,0 +1,9 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "Build (workspace)", "type": "shell", "command": "cargo build"},
+    {"label": "Clippy", "type": "shell", "command": "cargo clippy -- -D warnings"},
+    {"label": "Fmt Check", "type": "shell", "command": "cargo fmt -- --check"},
+    {"label": "UBL put hello", "type": "shell", "command": "cargo run -p ubl -- put vectors/hello.bin"}
+  ]
+}
