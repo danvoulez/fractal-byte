@@ -1,9 +1,24 @@
 pub mod api;
 
-use axum::{routing::{get, post}, Json, Router};
+use axum::{
+    extract::Request,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
+
+/// Max request body size: 1 MiB
+const MAX_BODY_BYTES: usize = 1_048_576;
+/// Request timeout
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,7 +54,31 @@ pub fn app() -> Router {
         .route("/v1/transition/:cid", get(api::get_transition))
         .route("/cid/:cid", get(api::get_cid_dispatch))
         .route("/.well-known/did.json", get(api::well_known_did_json))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        .layer(middleware::from_fn(require_json_content_type))
         .with_state(state)
+}
+
+/// Middleware: reject POST/PUT requests without application/json content-type.
+async fn require_json_content_type(req: Request, next: Next) -> Response {
+    let dominated_by_json = match req.method().as_str() {
+        "POST" | "PUT" | "PATCH" => {
+            req.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.starts_with("application/json"))
+                .unwrap_or(false)
+        }
+        _ => true, // GET, DELETE, etc. don't need content-type
+    };
+    if !dominated_by_json {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(json!({"error": "content-type must be application/json"})),
+        ).into_response();
+    }
+    next.run(req).await
 }
 
 async fn healthz() -> Json<serde_json::Value> {
