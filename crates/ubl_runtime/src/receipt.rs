@@ -16,6 +16,52 @@ use crate::jws::{sign_detached, JwsDetached};
 
 const VALID_TYPES: &[&str] = &["ubl/wa", "ubl/transition", "ubl/wf", "ubl/attestation"];
 
+/// LLM-first observability logline.
+/// Attached to `observability.logline` on every receipt.
+/// Does NOT affect body_cid — purely for "look and narrate".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Logline {
+    pub who: String,
+    pub actor_did: String,
+    pub what: String,
+    pub r#where: String,
+    pub when_iso: String,
+    pub why: String,
+    pub context_id: String,
+    pub version: String,
+}
+
+impl Logline {
+    pub fn now(who: &str, actor_did: &str, what: &str, where_: &str, why: &str, context_id: &str) -> Self {
+        Self {
+            who: who.into(),
+            actor_did: actor_did.into(),
+            what: what.into(),
+            r#where: where_.into(),
+            when_iso: chrono_now_iso(),
+            why: why.into(),
+            context_id: context_id.into(),
+            version: "0.1.0".into(),
+        }
+    }
+}
+
+fn chrono_now_iso() -> String {
+    // Simple ISO 8601 timestamp without chrono dependency
+    use std::time::SystemTime;
+    let d = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs();
+    // Rough UTC: good enough for observability, not for crypto
+    let (s, m, h) = (secs % 60, (secs / 60) % 60, (secs / 3600) % 24);
+    let days = secs / 86400;
+    // Approximate date from epoch days (not leap-second accurate, fine for logs)
+    let y = 1970 + days / 365;
+    let doy = days % 365;
+    let mo = doy / 30 + 1;
+    let day = doy % 30 + 1;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo.min(12), day.min(31), h, m, s)
+}
+
 /// Unified receipt envelope used across all pipeline stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
@@ -71,15 +117,24 @@ pub struct RunOpts<'a> {
     pub prev_tip: Option<&'a str>,
     pub ghost: bool,
     pub keys: &'a KeyRing,
-    /// Already-seen body_cids for idempotency (caller provides)
+    /// Already-seen keys for idempotency (caller provides)
     pub seen: Option<&'a std::collections::HashSet<String>>,
+    /// Optional logline context for observability
+    pub logline: Option<LoglineContext<'a>>,
+}
+
+/// Minimal context for generating loglines per receipt.
+pub struct LoglineContext<'a> {
+    pub who: &'a str,
+    pub actor_did: &'a str,
+    pub where_: &'a str,
+    pub why: &'a str,
+    pub context_id: &'a str,
 }
 
 impl<'a> Default for RunOpts<'a> {
     fn default() -> Self {
-        // Can't store a reference to a temporary, so this is only for tests
-        // In practice callers should construct RunOpts explicitly
-        Self { prev_tip: None, ghost: false, keys: &DEVKEYS, seen: None }
+        Self { prev_tip: None, ghost: false, keys: &DEVKEYS, seen: None, logline: None }
     }
 }
 
@@ -149,6 +204,24 @@ pub fn verify_body_cid(receipt: &Receipt) -> crate::error::Result<bool> {
     Ok(expected == receipt.body_cid)
 }
 
+/// Build the observability JSON for a receipt, merging ghost flag and logline.
+fn make_observability(ghost: bool, logline_ctx: &Option<LoglineContext>, what_suffix: &str) -> Option<serde_json::Value> {
+    let has_ghost = ghost;
+    let has_logline = logline_ctx.is_some();
+    if !has_ghost && !has_logline {
+        return None;
+    }
+    let mut obs = serde_json::Map::new();
+    if ghost {
+        obs.insert("ghost".into(), serde_json::Value::Bool(true));
+    }
+    if let Some(ctx) = logline_ctx {
+        let ll = Logline::now(ctx.who, ctx.actor_did, what_suffix, ctx.where_, ctx.why, ctx.context_id);
+        obs.insert("logline".into(), serde_json::to_value(&ll).unwrap());
+    }
+    Some(serde_json::Value::Object(obs))
+}
+
 /// Run the full receipt-first pipeline: WA → Transition(-1→0) → execute → WF.
 ///
 /// Every execution produces exactly 3 receipts (WA, Transition, WF) chained by parent CIDs.
@@ -196,7 +269,7 @@ pub fn run_with_receipts(
     }
 
     let mut wa = build_receipt("ubl/wa", wa_parents, wa_body, sign_key, kid)?;
-    if ghost { wa.observability = Some(serde_json::json!({"ghost": true})); }
+    wa.observability = make_observability(ghost, &opts.logline, "wa:write-ahead");
 
     // (2) Transition -1→0 (rho.normalize)
     let rho_val = serde_json::to_value(vars)?;
@@ -218,7 +291,7 @@ pub fn run_with_receipts(
         sign_key,
         kid,
     )?;
-    if ghost { transition.observability = Some(serde_json::json!({"ghost": true})); }
+    transition.observability = make_observability(ghost, &opts.logline, "transition:normalize");
 
     // (3) Execute deterministic pipeline (parse → policy → render)
     // On failure → produce DENY WF receipt, never 500
@@ -241,7 +314,7 @@ pub fn run_with_receipts(
                 sign_key,
                 kid,
             )?;
-            if ghost { wf.observability = Some(serde_json::json!({"ghost": true})); }
+            wf.observability = make_observability(ghost, &opts.logline, "wf:deny");
             let tip_cid = wf.body_cid.clone();
             return Ok(RunResult { wa, transition: Some(transition), wf, tip_cid, ghost });
         }
@@ -262,7 +335,7 @@ pub fn run_with_receipts(
         sign_key,
         kid,
     )?;
-    if ghost { wf.observability = Some(serde_json::json!({"ghost": true})); }
+    wf.observability = make_observability(ghost, &opts.logline, "wf:write-final");
 
     let tip_cid = wf.body_cid.clone();
 
@@ -288,6 +361,7 @@ pub fn run_with_receipts_simple(
         ghost: false,
         keys: &keys,
         seen: None,
+        logline: None,
     };
     run_with_receipts(manifest, vars, cfg, &opts)
 }
@@ -480,7 +554,7 @@ mod tests {
 
         let (manifest, vars, cfg) = test_manifest_vars_cfg();
         let keys = KeyRing::dev();
-        let opts = RunOpts { prev_tip: None, ghost: true, keys: &keys, seen: None };
+        let opts = RunOpts { prev_tip: None, ghost: true, keys: &keys, seen: None, logline: None };
         let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
 
         assert!(result.ghost);
@@ -507,7 +581,7 @@ mod tests {
         seen.insert(idemp_key);
 
         // Run with same input should be rejected as replay
-        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: Some(&seen) };
+        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: Some(&seen), logline: None };
         let err = run_with_receipts(&manifest, &vars, &cfg, &opts);
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("duplicate request (replay)"));
@@ -567,10 +641,69 @@ mod tests {
             next_kid: Some("did:custom#k3".into()),
         };
         let (manifest, vars, cfg) = test_manifest_vars_cfg();
-        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: None };
+        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: None, logline: None };
         let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
         assert_eq!(result.wa.proof.kid, "did:custom#k2");
         assert_eq!(result.wf.proof.kid, "did:custom#k2");
+    }
+
+    // ── Logline test ──────────────────────────────────────────────
+
+    #[test]
+    fn logline_attached_to_all_receipts() {
+        let (manifest, vars, cfg) = test_manifest_vars_cfg();
+        let keys = KeyRing::dev();
+        let ctx = LoglineContext {
+            who: "test-runner",
+            actor_did: "did:dev#k1",
+            where_: "unit-test",
+            why: "verify logline attachment",
+            context_id: "ctx-001",
+        };
+        let opts = RunOpts {
+            prev_tip: None, ghost: false, keys: &keys, seen: None,
+            logline: Some(ctx),
+        };
+        let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
+
+        // All three receipts should have observability.logline
+        for (label, rc) in [("wa", &result.wa), ("wf", &result.wf)] {
+            let obs = rc.observability.as_ref().expect(&format!("{} missing observability", label));
+            let ll = &obs["logline"];
+            assert_eq!(ll["who"], "test-runner", "{} logline.who", label);
+            assert_eq!(ll["actor_did"], "did:dev#k1", "{} logline.actor_did", label);
+            assert_eq!(ll["context_id"], "ctx-001", "{} logline.context_id", label);
+            assert!(!ll["when_iso"].as_str().unwrap().is_empty(), "{} logline.when_iso", label);
+            assert_eq!(ll["version"], "0.1.0", "{} logline.version", label);
+        }
+        let tr = result.transition.as_ref().unwrap();
+        let tr_ll = &tr.observability.as_ref().unwrap()["logline"];
+        assert_eq!(tr_ll["who"], "test-runner");
+        assert!(tr_ll["what"].as_str().unwrap().contains("transition"));
+
+        // ghost should NOT be present when ghost=false
+        assert!(result.wa.observability.as_ref().unwrap().get("ghost").is_none());
+    }
+
+    #[test]
+    fn logline_and_ghost_coexist() {
+        let (manifest, vars, cfg) = test_manifest_vars_cfg();
+        let keys = KeyRing::dev();
+        let ctx = LoglineContext {
+            who: "ghost-test",
+            actor_did: "did:dev#k1",
+            where_: "unit-test",
+            why: "verify ghost+logline",
+            context_id: "ctx-ghost",
+        };
+        let opts = RunOpts {
+            prev_tip: None, ghost: true, keys: &keys, seen: None,
+            logline: Some(ctx),
+        };
+        let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
+        let obs = result.wa.observability.as_ref().unwrap();
+        assert_eq!(obs["ghost"], true);
+        assert_eq!(obs["logline"]["who"], "ghost-test");
     }
 
     // ── Helper ────────────────────────────────────────────────────

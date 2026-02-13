@@ -207,6 +207,7 @@ pub async fn execute_runtime(State(state): State<AppState>, Json(req): Json<Exec
         ghost,
         keys: &state.keys,
         seen: Some(&seen_snapshot),
+        logline: None,
     };
 
     match ubl_runtime::run_with_receipts(&req.manifest, &req.vars, &cfg, &opts) {
