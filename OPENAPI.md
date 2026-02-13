@@ -103,6 +103,29 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ExecuteError" }
 
+  # ── Transition Receipt ────────────────────────────────────────
+  /v1/transition/{cid}:
+    get:
+      summary: Retorna o Transition Receipt (RB→rho) pelo CID do recibo ou rho_cid
+      operationId: getTransition
+      parameters:
+        - name: cid
+          in: path
+          required: true
+          schema: { type: string }
+          description: CID do transition receipt ou rho_cid
+      responses:
+        "200":
+          description: Transition receipt envelope (body + proof JWS detached)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransitionEnvelope" }
+        "404":
+          description: Transition receipt não encontrado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   # ── Certify ────────────────────────────────────────────────────
   /v1/certify:
     post:
@@ -282,6 +305,45 @@ components:
         rc_cid: { type: string, nullable: true, description: "b3:<hex64> — CID do Receipt emitido (null se chip não emitiu EmitRc)" }
         steps: { type: integer, description: "Número de instruções executadas" }
         fuel_used: { type: integer, description: "Fuel consumido" }
+        transition_receipt:
+          nullable: true
+          $ref: "#/components/schemas/TransitionEnvelope"
+
+    # ── Transition Receipt ─────────────────────────────────────
+    TransitionEnvelope:
+      type: object
+      required: [cid, body, proof]
+      properties:
+        cid: { type: string, description: "b3:<hex64> — CID canônico do corpo do transition receipt" }
+        body:
+          type: object
+          required: [t, v, from_layer, to_layer, op, preimage_raw_cid, rho_cid, witness]
+          properties:
+            t: { type: string, const: "ubl/transition" }
+            v: { type: string, const: "1" }
+            from_layer: { type: string, example: "-1:rb" }
+            to_layer: { type: string, example: "0:rho" }
+            op: { type: string, example: "rho.normalize@ai-nrf1/v1" }
+            preimage_raw_cid: { type: string, pattern: "^b3:[0-9a-f]{64}$" }
+            rho_cid: { type: string, pattern: "^b3:[0-9a-f]{64}$" }
+            witness:
+              type: object
+              properties:
+                vm: { type: string, example: "rb-vm@0.1.0" }
+                bytecode_cid: { type: string, nullable: true }
+                fuel_spent: { type: integer, nullable: true }
+            ghost: { type: boolean, nullable: true }
+            parents: { type: array, items: { type: string }, default: [] }
+        proof:
+          $ref: "#/components/schemas/JwsDetached"
+    JwsDetached:
+      type: object
+      required: [protected, signature, kid]
+      description: "JWS detached (RFC 7797, b64=false). Payload = canonical body bytes (não embarcado)."
+      properties:
+        protected: { type: string, description: "Base64url do header protegido (alg:EdDSA, b64:false, typ:ubl/rc+json)" }
+        signature: { type: string, description: "Base64url da assinatura Ed25519" }
+        kid: { type: string, description: "DID key identifier", example: "did:dev#k1" }
 
     # ── Manifest (runtime) ──────────────────────────────────────
     Manifest:
@@ -361,6 +423,7 @@ components:
 | `/v1/ingest` | POST | ✅ | ✅ |
 | `/v1/execute` | POST | ✅ | ✅ |
 | `/v1/execute/rb` | POST | ✅ | ✅ |
+| `/v1/transition/:cid` | GET | ✅ | ✅ |
 | `/v1/certify` | POST | ✅ | ✅ |
 | `/v1/receipt/:cid` | GET | ✅ | ✅ |
 | `/v1/resolve` | POST | ✅ | ✅ |
