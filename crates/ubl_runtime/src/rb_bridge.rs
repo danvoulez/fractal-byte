@@ -68,6 +68,7 @@ pub struct ExecuteRbRes {
     pub rc_cid: Option<String>,
     pub steps: u64,
     pub fuel_used: u64,
+    pub transition_receipt: Option<serde_json::Value>,
 }
 
 pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::RuntimeError> {
@@ -78,14 +79,22 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
     let signer = FixedSigner::from_seed([7u8; 32]);
     let canon = NaiveCanon;
 
+    // (A) Capture raw bytes BEFORE normalization (layer -1)
+    let raw_bytes = serde_json::to_vec(&req.inputs)
+        .map_err(|e| crate::error::RuntimeError::Engine(format!("serialize inputs: {}", e)))?;
+    let ghost = req.ghost.unwrap_or(false);
+
     let input_cids: Vec<Cid> = req.inputs.iter().map(|v| {
         let bytes = serde_json::to_vec(v).unwrap_or_default();
         cas.put(&bytes)
     }).collect();
 
+    // CID of the chip bytecode itself (content-addressed)
+    let bytecode_cid = crate::cid::cid_b3(&req.chip);
+
     let cfg = VmConfig {
         fuel_limit: req.fuel.unwrap_or(50_000),
-        ghost: req.ghost.unwrap_or(false),
+        ghost,
     };
 
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
@@ -95,9 +104,32 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
         other => crate::error::RuntimeError::Engine(other.to_string()),
     })?;
 
+    // (B) Capture rho bytes AFTER normalization (layer 0)
+    // The canonical form of the inputs is the rho layer
+    let rho_val = serde_json::to_value(&req.inputs)
+        .map_err(|e| crate::error::RuntimeError::Engine(format!("rho serialize: {}", e)))?;
+    let rho_bytes = crate::canon::canonical_bytes(&rho_val)?;
+
+    // (C) Build Transition Receipt (RB→rho)
+    let tr = crate::transition::build_transition(
+        &raw_bytes,
+        &rho_bytes,
+        "rb-vm@0.1.0",
+        Some(bytecode_cid),
+        Some(outcome.fuel_used),
+        ghost,
+    );
+
+    let tr_cid = tr.cid()?;
+    let tr_envelope = serde_json::json!({
+        "cid": tr_cid,
+        "body": serde_json::to_value(&tr).map_err(|e| crate::error::RuntimeError::Engine(e.to_string()))?,
+    });
+
     Ok(ExecuteRbRes {
         rc_cid: outcome.rc_cid.map(|c| c.0),
         steps: outcome.steps,
         fuel_used: outcome.fuel_used,
+        transition_receipt: Some(tr_envelope),
     })
 }

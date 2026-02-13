@@ -133,6 +133,7 @@ pub struct ExecRbResponse {
     pub rc_cid: Option<String>,
     pub steps: u64,
     pub fuel_used: u64,
+    pub transition_receipt: Option<Value>,
 }
 
 pub async fn execute_rb(Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
@@ -152,6 +153,7 @@ pub async fn execute_rb(Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
                 rc_cid: res.rc_cid,
                 steps: res.steps,
                 fuel_used: res.fuel_used,
+                transition_receipt: res.transition_receipt,
             };
             (StatusCode::OK, Json(resp)).into_response()
         }

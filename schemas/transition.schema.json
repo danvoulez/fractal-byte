@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ubl.agency/schemas/transition.schema.json",
+  "title": "UBL Transition Receipt (RB→rho)",
+  "description": "Receipt proving the deterministic transition from layer -1 (RB/bytecode) to layer 0 (rho/canonical).",
+  "type": "object",
+  "required": ["t", "v", "from_layer", "to_layer", "op", "preimage_raw_cid", "rho_cid", "witness"],
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "ubl/transition"
+    },
+    "v": {
+      "type": "string",
+      "const": "1"
+    },
+    "from_layer": {
+      "type": "string",
+      "description": "Source layer identifier",
+      "examples": ["-1:rb"]
+    },
+    "to_layer": {
+      "type": "string",
+      "description": "Target layer identifier",
+      "examples": ["0:rho"]
+    },
+    "op": {
+      "type": "string",
+      "description": "Normalization operator with version",
+      "examples": ["rho.normalize@ai-nrf1/v1"]
+    },
+    "preimage_raw_cid": {
+      "type": "string",
+      "description": "b3:<hex64> CID of the raw bytes before normalization",
+      "pattern": "^b3:[0-9a-f]{64}$"
+    },
+    "rho_cid": {
+      "type": "string",
+      "description": "b3:<hex64> CID of the canonical bytes after rho normalization",
+      "pattern": "^b3:[0-9a-f]{64}$"
+    },
+    "witness": {
+      "type": "object",
+      "required": ["vm"],
+      "properties": {
+        "vm": {
+          "type": "string",
+          "description": "VM identifier and version",
+          "examples": ["rb-vm@0.1.0"]
+        },
+        "bytecode_cid": {
+          "type": "string",
+          "description": "CID of the chip bytecode (optional)"
+        },
+        "fuel_spent": {
+          "type": "integer",
+          "description": "Fuel consumed during execution"
+        }
+      }
+    },
+    "ghost": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, raw preimage bytes were not persisted (privacy mode)"
+    },
+    "parents": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "CIDs of parent receipts for chaining"
+    }
+  },
+  "additionalProperties": false
+}
