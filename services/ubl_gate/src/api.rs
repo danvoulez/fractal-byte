@@ -1,4 +1,5 @@
 use crate::{AppState, ClientInfo};
+use crate::scope::Scope;
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
@@ -30,13 +31,14 @@ pub struct IngestReq {
 }
 
 pub async fn ingest(
+    scope: Scope,
     client: Option<Extension<ClientInfo>>,
     Json(req): Json<IngestReq>,
 ) -> impl IntoResponse {
     let tenant = client
         .as_ref()
         .map(|Extension(ci)| ci.tenant_id.as_str())
-        .unwrap_or("default");
+        .unwrap_or(&scope.tenant);
     let nrf_val = match json_to_nrf(&req.payload) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -75,6 +77,7 @@ async fn resolve_raw(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
 }
 
 pub async fn get_cid_dispatch(
+    scope: Scope,
     client: Option<Extension<ClientInfo>>,
     Path(cid_raw): Path<String>,
 ) -> impl IntoResponse {
@@ -82,7 +85,7 @@ pub async fn get_cid_dispatch(
     let tenant = client
         .as_ref()
         .map(|Extension(ci)| ci.tenant_id.as_str())
-        .unwrap_or("default");
+        .unwrap_or(&scope.tenant);
     if let Some(bare) = cid_str.strip_suffix(".json") {
         return get_cid_json_inner(tenant, bare).await;
     }
@@ -141,13 +144,14 @@ fn nrf_value_to_json(v: &NrfValue) -> Value {
 }
 
 pub async fn certify_cid(
+    scope: Scope,
     client: Option<Extension<ClientInfo>>,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
     let tenant = client
         .as_ref()
         .map(|Extension(ci)| ci.tenant_id.as_str())
-        .unwrap_or("default");
+        .unwrap_or(&scope.tenant);
     let cid_str = match payload.get("cid").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => return (StatusCode::BAD_REQUEST, "missing cid").into_response(),
@@ -172,25 +176,28 @@ pub async fn certify_cid(
 
 pub async fn get_receipt(
     State(state): State<AppState>,
-    client: Option<Extension<ClientInfo>>,
+    scope: Scope,
+    _client: Option<Extension<ClientInfo>>,
     Path(cid_raw): Path<String>,
 ) -> impl IntoResponse {
     let cid_str = normalize_cid_in_path(&cid_raw);
-    let tenant = client
-        .as_ref()
-        .map(|Extension(ci)| ci.tenant_id.as_str())
-        .unwrap_or("default");
 
     // First check the receipt chain (populated by /v1/execute)
+    // Storage key is scoped: "app:tenant:cid"
     {
         let store = state.receipt_chain.read().unwrap();
+        let scoped_key = scope.scoped_cid(&cid_str);
+        if let Some(receipt) = store.get(&scoped_key) {
+            return (StatusCode::OK, Json(receipt.clone())).into_response();
+        }
+        // Fallback: try unscoped key (legacy data)
         if let Some(receipt) = store.get(&cid_str) {
-            // Tenant isolation: check __tenant_id
+            // Legacy receipt — check __tenant_id for backward compat
             let receipt_tenant = receipt
                 .get("__tenant_id")
                 .and_then(|t| t.as_str())
                 .unwrap_or("default");
-            if receipt_tenant != tenant {
+            if receipt_tenant != scope.tenant {
                 return (
                     StatusCode::NOT_FOUND,
                     Json(json!({"error": "receipt not found"})),
@@ -328,27 +335,32 @@ pub async fn execute_rb(
 
 pub async fn list_receipts(
     State(state): State<AppState>,
-    client: Option<Extension<ClientInfo>>,
+    scope: Scope,
+    _client: Option<Extension<ClientInfo>>,
 ) -> impl IntoResponse {
-    let tenant = client
-        .as_ref()
-        .map(|Extension(ci)| ci.tenant_id.as_str())
-        .unwrap_or("default");
+    let prefix = scope.key_prefix(); // "app:tenant"
     let store = state.receipt_chain.read().unwrap();
     let filtered: serde_json::Map<String, Value> = store
         .iter()
-        .filter(|(_k, v)| {
+        .filter(|(k, v)| {
+            // Match scoped keys "app:tenant:cid"
+            if k.starts_with(&prefix) {
+                return true;
+            }
+            // Legacy fallback: match __tenant_id
             v.get("__tenant_id")
                 .and_then(|t| t.as_str())
-                .map(|t| t == tenant)
-                .unwrap_or(true) // legacy receipts without tenant tag are visible to all
+                .map(|t| t == scope.tenant)
+                .unwrap_or(scope.tenant == "default")
         })
         .map(|(k, v)| {
+            // Strip scope prefix from key for clean output
+            let clean_key = k.strip_prefix(&format!("{prefix}:")).unwrap_or(k).to_string();
             let mut clean = v.clone();
             if let Some(obj) = clean.as_object_mut() {
                 obj.remove("__tenant_id");
             }
-            (k.clone(), clean)
+            (clean_key, clean)
         })
         .collect();
     (StatusCode::OK, Json(json!(filtered)))
@@ -356,27 +368,30 @@ pub async fn list_receipts(
 
 pub async fn audit_report(
     State(state): State<AppState>,
-    client: Option<Extension<ClientInfo>>,
+    scope: Scope,
+    _client: Option<Extension<ClientInfo>>,
 ) -> impl IntoResponse {
-    let tenant = client
-        .as_ref()
-        .map(|Extension(ci)| ci.tenant_id.as_str())
-        .unwrap_or("default");
+    let prefix = scope.key_prefix();
     let store = state.receipt_chain.read().unwrap();
     let chain: BTreeMap<String, Value> = store
         .iter()
-        .filter(|(_k, v)| {
+        .filter(|(k, v)| {
+            if k.starts_with(&prefix) {
+                return true;
+            }
+            // Legacy fallback
             v.get("__tenant_id")
                 .and_then(|t| t.as_str())
-                .map(|t| t == tenant)
-                .unwrap_or(true)
+                .map(|t| t == scope.tenant)
+                .unwrap_or(scope.tenant == "default")
         })
         .map(|(k, v)| {
+            let clean_key = k.strip_prefix(&format!("{prefix}:")).unwrap_or(k).to_string();
             let mut clean = v.clone();
             if let Some(obj) = clean.as_object_mut() {
                 obj.remove("__tenant_id");
             }
-            (k.clone(), clean)
+            (clean_key, clean)
         })
         .collect();
     let report = crate::audit::generate_report(&chain);
@@ -411,6 +426,7 @@ pub struct ExecRequestFull {
 
 pub async fn execute_runtime(
     State(state): State<AppState>,
+    scope: Scope,
     client: Option<Extension<ClientInfo>>,
     Json(req): Json<ExecRequestFull>,
 ) -> impl IntoResponse {
@@ -444,30 +460,23 @@ pub async fn execute_runtime(
 
     match ubl_runtime::run_with_receipts(&req.manifest, &req.vars, &cfg, &opts) {
         Ok(run) => {
-            let tenant = client
-                .as_ref()
-                .map(|Extension(ci)| ci.tenant_id.clone())
-                .unwrap_or_else(|| "default".to_string());
-
             // Store receipts + update seen_cids + update last_tip (unless ghost)
             if !run.ghost {
                 let mut store = state.receipt_chain.write().unwrap();
-                // Tag each receipt with __tenant_id for tenant isolation
+                // Store with scoped keys: "app:tenant:cid"
                 for (cid, val) in [
                     (&run.wa.body_cid, serde_json::to_value(&run.wa).unwrap()),
                     (&run.wf.body_cid, serde_json::to_value(&run.wf).unwrap()),
                 ] {
-                    let mut v = val;
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("__tenant_id".into(), json!(tenant));
-                    }
-                    store.insert(cid.clone(), v);
+                    let scoped_key = scope.scoped_cid(cid);
+                    store.insert(scoped_key, val.clone());
+                    // Also store unscoped for legacy compat
+                    store.insert(cid.clone(), val);
                 }
                 if let Some(ref tr) = run.transition {
-                    let mut v = serde_json::to_value(tr).unwrap();
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("__tenant_id".into(), json!(tenant));
-                    }
+                    let v = serde_json::to_value(tr).unwrap();
+                    let scoped_key = scope.scoped_cid(&tr.body_cid);
+                    store.insert(scoped_key, v.clone());
                     store.insert(tr.body_cid.clone(), v);
                 }
             }

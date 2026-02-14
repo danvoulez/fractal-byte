@@ -1,5 +1,7 @@
 pub mod api;
 pub mod audit;
+pub mod error;
+pub mod scope;
 
 use axum::http::HeaderValue;
 use axum::{
@@ -147,17 +149,24 @@ impl TokenStore {
     }
 }
 
-// ── Per-tenant CORS ─────────────────────────────────────────────
+// ── CORS config: (app, tenant) scoped ──────────────────────────
 
-/// CORS configuration supporting per-tenant origin allowlists.
-/// Global origins apply to all requests. Tenant origins apply only
-/// when the authenticated client belongs to that tenant.
+/// CORS configuration supporting hierarchical origin allowlists.
+///
+/// Lookup order for a request to `/a/<app>/t/<tenant>/v1/*`:
+///   1. `(app, tenant)` specific origins
+///   2. `(app, *)` app-level origins
+///   3. Global "safe" origins
+///
+/// Legacy `/v1/*` routes use `(default, default)`.
 #[derive(Clone, Debug)]
 pub struct CorsConfig {
-    /// Origins allowed for all tenants.
+    /// Origins allowed for all apps/tenants.
     pub global_origins: Vec<String>,
-    /// Per-tenant origin overrides. Key = tenant_id.
-    pub tenant_origins: HashMap<String, Vec<String>>,
+    /// Per-app origin overrides. Key = app_id.
+    pub app_origins: HashMap<String, Vec<String>>,
+    /// Per-(app, tenant) origin overrides. Key = "app:tenant".
+    pub scoped_origins: HashMap<String, Vec<String>>,
 }
 
 impl Default for CorsConfig {
@@ -168,10 +177,10 @@ impl Default for CorsConfig {
 
 impl CorsConfig {
     /// Build from environment variables:
-    /// - `CORS_GLOBAL_ORIGINS`: comma-separated list of global origins
-    /// - `CORS_TENANT_<TENANT_ID>_ORIGINS`: comma-separated list per tenant
-    ///
-    /// Falls back to sensible defaults for dev.
+    /// - `CORS_GLOBAL_ORIGINS`: comma-separated global origins
+    /// - `CORS_APP_<APP>_ORIGINS`: per-app origins
+    /// - `CORS_APP_<APP>_TENANT_<TENANT>_ORIGINS`: per-(app, tenant) origins
+    /// - Legacy: `CORS_TENANT_<TENANT>_ORIGINS` → mapped to (default, <tenant>)
     pub fn from_env() -> Self {
         let global = std::env::var("CORS_GLOBAL_ORIGINS")
             .unwrap_or_else(|_| [
@@ -189,49 +198,81 @@ impl CorsConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let mut tenant_origins: HashMap<String, Vec<String>> = HashMap::new();
+        let mut app_origins: HashMap<String, Vec<String>> = HashMap::new();
+        let mut scoped_origins: HashMap<String, Vec<String>> = HashMap::new();
+
         for (key, val) in std::env::vars() {
+            let origins: Vec<String> = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if origins.is_empty() {
+                continue;
+            }
+
+            // CORS_APP_<APP>_TENANT_<TENANT>_ORIGINS → scoped
+            if let Some(rest) = key.strip_prefix("CORS_APP_") {
+                if let Some(rest) = rest.strip_suffix("_ORIGINS") {
+                    if let Some((app, tenant)) = rest.split_once("_TENANT_") {
+                        let scope_key = format!("{}:{}", app.to_lowercase(), tenant.to_lowercase());
+                        scoped_origins.insert(scope_key, origins);
+                    } else {
+                        // CORS_APP_<APP>_ORIGINS → app-level
+                        app_origins.insert(rest.to_lowercase(), origins);
+                    }
+                }
+                continue;
+            }
+
+            // Legacy: CORS_TENANT_<TENANT>_ORIGINS → (default, <tenant>)
             if let Some(tenant_id) = key
                 .strip_prefix("CORS_TENANT_")
                 .and_then(|rest| rest.strip_suffix("_ORIGINS"))
             {
-                let origins: Vec<String> = val
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !origins.is_empty() {
-                    tenant_origins.insert(tenant_id.to_lowercase(), origins);
-                }
+                let scope_key = format!("default:{}", tenant_id.to_lowercase());
+                scoped_origins.insert(scope_key, origins);
             }
         }
 
         Self {
             global_origins,
-            tenant_origins,
+            app_origins,
+            scoped_origins,
         }
     }
 
-    /// Check if an origin is allowed for a given tenant.
-    pub fn is_origin_allowed(&self, origin: &str, tenant_id: Option<&str>) -> bool {
-        // Global origins always allowed
-        if self.global_origins.iter().any(|o| o == origin) {
-            return true;
-        }
-        // Tenant-specific origins
-        if let Some(tid) = tenant_id {
-            if let Some(origins) = self.tenant_origins.get(tid) {
-                return origins.iter().any(|o| o == origin);
+    /// Check if an origin is allowed for a given scope.
+    /// Lookup: (app, tenant) → (app, *) → global.
+    pub fn is_origin_allowed(&self, origin: &str, scope: Option<&scope::Scope>) -> bool {
+        // 1. (app, tenant) specific
+        if let Some(s) = scope {
+            let key = format!("{}:{}", s.app, s.tenant);
+            if let Some(origins) = self.scoped_origins.get(&key) {
+                if origins.iter().any(|o| o == origin) {
+                    return true;
+                }
+            }
+            // 2. App-level
+            if let Some(origins) = self.app_origins.get(&s.app) {
+                if origins.iter().any(|o| o == origin) {
+                    return true;
+                }
             }
         }
-        false
+        // 3. Global
+        self.global_origins.iter().any(|o| o == origin)
     }
 
-    /// Return all allowed origins for a tenant (global + tenant-specific).
-    pub fn allowed_origins_for(&self, tenant_id: &str) -> Vec<String> {
+    /// Return all allowed origins for a scope (merged: scoped + app + global).
+    pub fn allowed_origins_for(&self, scope: &scope::Scope) -> Vec<String> {
         let mut origins = self.global_origins.clone();
-        if let Some(tenant_specific) = self.tenant_origins.get(tenant_id) {
-            origins.extend(tenant_specific.iter().cloned());
+        if let Some(app_specific) = self.app_origins.get(&scope.app) {
+            origins.extend(app_specific.iter().cloned());
+        }
+        let key = format!("{}:{}", scope.app, scope.tenant);
+        if let Some(scoped) = self.scoped_origins.get(&key) {
+            origins.extend(scoped.iter().cloned());
         }
         origins
     }
@@ -284,28 +325,79 @@ pub fn init_metrics() -> Option<metrics_exporter_prometheus::PrometheusHandle> {
     builder.install_recorder().ok()
 }
 
+/// Build the shared v1 API routes (no state attached yet).
+fn v1_routes() -> Router<AppState> {
+    Router::new()
+        .route("/ingest", post(api::ingest))
+        .route("/certify", post(api::certify_cid))
+        .route("/receipts", get(api::list_receipts))
+        .route("/receipt/:cid", get(api::get_receipt))
+        .route("/audit", get(api::audit_report))
+        .route("/resolve", post(api::resolve))
+        .route("/execute", post(api::execute_runtime))
+        .route("/execute/rb", post(api::execute_rb))
+        .route("/transition/:cid", get(api::get_transition))
+}
+
+/// Middleware: inject Scope from path params :app and :tenant into request extensions.
+async fn inject_scope_from_path(req: Request, next: Next) -> Response {
+    let mut req = req;
+    // Extract :app and :tenant from Axum's matched path params
+    // These are available when routes are nested under /a/:app/t/:tenant/v1
+    let path = req.uri().path().to_string();
+    let scope = parse_scope_from_path(&path).unwrap_or_default();
+    req.extensions_mut().insert(scope);
+    next.run(req).await
+}
+
+/// Parse (app, tenant) from a path like /a/<app>/t/<tenant>/v1/...
+fn parse_scope_from_path(path: &str) -> Option<scope::Scope> {
+    let parts: Vec<&str> = path.split('/').collect();
+    // Expected: ["", "a", "<app>", "t", "<tenant>", "v1", ...]
+    if parts.len() >= 6 && parts[1] == "a" && parts[3] == "t" && parts[5] == "v1" {
+        Some(scope::Scope::new(parts[2], parts[4]))
+    } else {
+        None
+    }
+}
+
+/// Middleware: inject legacy Scope (default, default) into request extensions.
+async fn inject_legacy_scope(req: Request, next: Next) -> Response {
+    let mut req = req;
+    if req.extensions().get::<scope::Scope>().is_none() {
+        req.extensions_mut().insert(scope::Scope::legacy());
+    }
+    next.run(req).await
+}
+
 pub fn app_with_state(state: AppState) -> Router {
     let auth_state = state.clone();
     let rl_state = state.clone();
-    let _metrics_state = state.clone();
     let cors_config = state.cors_config.clone();
+
+    // Scoped routes: /a/:app/t/:tenant/v1/*
+    // The :app and :tenant are parsed by inject_scope_from_path middleware.
+    let scoped_v1 = v1_routes()
+        .layer(middleware::from_fn(inject_scope_from_path));
+
+    // Legacy routes: /v1/* → Scope(default, default)
+    let legacy_v1 = v1_routes()
+        .layer(middleware::from_fn(inject_legacy_scope));
+
     // Layer order: Axum applies layers in REVERSE order.
     // Last .layer() = outermost (runs first).
     // We want: CORS (outermost) → auth → metrics → rate_limit → content-type → timeout → body_limit
     Router::new()
+        // Public routes (no auth, no scope)
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_endpoint))
-        .route("/v1/ingest", post(api::ingest))
-        .route("/v1/certify", post(api::certify_cid))
-        .route("/v1/receipts", get(api::list_receipts))
-        .route("/v1/receipt/:cid", get(api::get_receipt))
-        .route("/v1/audit", get(api::audit_report))
-        .route("/v1/resolve", post(api::resolve))
-        .route("/v1/execute", post(api::execute_runtime))
-        .route("/v1/execute/rb", post(api::execute_rb))
-        .route("/v1/transition/:cid", get(api::get_transition))
-        .route("/cid/:cid", get(api::get_cid_dispatch))
         .route("/.well-known/did.json", get(api::well_known_did_json))
+        // Legacy CID dispatch (outside v1 namespace)
+        .route("/cid/:cid", get(api::get_cid_dispatch))
+        // Scoped v1 routes: /a/:app/t/:tenant/v1/*
+        .nest("/a/:app/t/:tenant/v1", scoped_v1)
+        // Legacy v1 routes: /v1/* → (default, default)
+        .nest("/v1", legacy_v1)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
         .layer(middleware::from_fn(require_json_content_type))
@@ -323,10 +415,11 @@ pub fn app_with_state(state: AppState) -> Router {
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::AllowOrigin::predicate(
-                    move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
+                    move |origin: &HeaderValue, parts: &axum::http::request::Parts| {
+                        let scope = parse_scope_from_path(parts.uri.path());
                         origin
                             .to_str()
-                            .map(|o| cors_config.is_origin_allowed(o, None))
+                            .map(|o| cors_config.is_origin_allowed(o, scope.as_ref()))
                             .unwrap_or(false)
                     },
                 ))
@@ -342,11 +435,14 @@ pub fn app_with_state(state: AppState) -> Router {
                     axum::http::header::AUTHORIZATION,
                     "x-ubl-compat".parse().unwrap(),
                     "x-request-id".parse().unwrap(),
+                    "idempotency-key".parse().unwrap(),
                 ])
                 .expose_headers([
                     "x-ratelimit-limit".parse().unwrap(),
                     "x-ratelimit-remaining".parse().unwrap(),
                     "retry-after".parse().unwrap(),
+                    "deprecation".parse().unwrap(),
+                    "sunset".parse().unwrap(),
                 ])
                 .max_age(Duration::from_secs(3600)),
         )
@@ -518,11 +614,19 @@ async fn metrics_endpoint(State(state): axum::extract::State<AppState>) -> impl 
 mod cors_tests {
     use super::*;
 
+    fn cfg_empty() -> CorsConfig {
+        CorsConfig {
+            global_origins: vec![],
+            app_origins: HashMap::new(),
+            scoped_origins: HashMap::new(),
+        }
+    }
+
     #[test]
     fn global_origin_allowed() {
         let cfg = CorsConfig {
             global_origins: vec!["https://ubl.agency".into(), "http://localhost:3000".into()],
-            tenant_origins: HashMap::new(),
+            ..cfg_empty()
         };
         assert!(cfg.is_origin_allowed("https://ubl.agency", None));
         assert!(cfg.is_origin_allowed("http://localhost:3000", None));
@@ -530,49 +634,85 @@ mod cors_tests {
     }
 
     #[test]
-    fn tenant_origin_allowed() {
-        let mut tenant_origins = HashMap::new();
-        tenant_origins.insert("acme".into(), vec!["https://app.acme.com".into()]);
+    fn scoped_origin_allowed() {
+        let mut scoped = HashMap::new();
+        scoped.insert("ubl:acme".into(), vec!["https://app.acme.com".into()]);
         let cfg = CorsConfig {
             global_origins: vec!["https://ubl.agency".into()],
-            tenant_origins,
+            scoped_origins: scoped,
+            ..cfg_empty()
         };
-        // Tenant-specific origin allowed for that tenant
-        assert!(cfg.is_origin_allowed("https://app.acme.com", Some("acme")));
-        // Not allowed for a different tenant
-        assert!(!cfg.is_origin_allowed("https://app.acme.com", Some("other")));
-        // Not allowed without tenant context
+        let acme = scope::Scope::new("ubl", "acme");
+        let other = scope::Scope::new("ubl", "other");
+        // Scoped origin allowed for that (app, tenant)
+        assert!(cfg.is_origin_allowed("https://app.acme.com", Some(&acme)));
+        // Not allowed for a different tenant in same app
+        assert!(!cfg.is_origin_allowed("https://app.acme.com", Some(&other)));
+        // Not allowed without scope
         assert!(!cfg.is_origin_allowed("https://app.acme.com", None));
-        // Global still works for any tenant
-        assert!(cfg.is_origin_allowed("https://ubl.agency", Some("acme")));
+        // Global still works for any scope
+        assert!(cfg.is_origin_allowed("https://ubl.agency", Some(&acme)));
+    }
+
+    #[test]
+    fn app_level_origin_fallback() {
+        let mut app = HashMap::new();
+        app.insert("ubl".into(), vec!["https://app.ubl.com".into()]);
+        let cfg = CorsConfig {
+            global_origins: vec!["https://ubl.agency".into()],
+            app_origins: app,
+            scoped_origins: HashMap::new(),
+        };
+        let any_tenant = scope::Scope::new("ubl", "whatever");
+        // App-level origin works for any tenant in that app
+        assert!(cfg.is_origin_allowed("https://app.ubl.com", Some(&any_tenant)));
+        // Not for a different app
+        let other_app = scope::Scope::new("other", "whatever");
+        assert!(!cfg.is_origin_allowed("https://app.ubl.com", Some(&other_app)));
     }
 
     #[test]
     fn allowed_origins_for_merges() {
-        let mut tenant_origins = HashMap::new();
-        tenant_origins.insert("acme".into(), vec!["https://app.acme.com".into()]);
+        let mut scoped = HashMap::new();
+        scoped.insert("ubl:acme".into(), vec!["https://app.acme.com".into()]);
+        let mut app = HashMap::new();
+        app.insert("ubl".into(), vec!["https://app.ubl.com".into()]);
         let cfg = CorsConfig {
             global_origins: vec!["https://ubl.agency".into()],
-            tenant_origins,
+            app_origins: app,
+            scoped_origins: scoped,
         };
-        let origins = cfg.allowed_origins_for("acme");
-        assert_eq!(origins.len(), 2);
+        let acme = scope::Scope::new("ubl", "acme");
+        let origins = cfg.allowed_origins_for(&acme);
+        assert_eq!(origins.len(), 3);
         assert!(origins.contains(&"https://ubl.agency".into()));
+        assert!(origins.contains(&"https://app.ubl.com".into()));
         assert!(origins.contains(&"https://app.acme.com".into()));
 
-        // Unknown tenant gets only global
-        let origins = cfg.allowed_origins_for("unknown");
-        assert_eq!(origins.len(), 1);
+        // Unknown tenant in same app gets global + app
+        let unknown = scope::Scope::new("ubl", "unknown");
+        let origins = cfg.allowed_origins_for(&unknown);
+        assert_eq!(origins.len(), 2);
     }
 
     #[test]
     fn empty_config() {
-        let cfg = CorsConfig {
-            global_origins: vec![],
-            tenant_origins: HashMap::new(),
-        };
+        let cfg = cfg_empty();
         assert!(!cfg.is_origin_allowed("https://anything.com", None));
-        assert!(cfg.allowed_origins_for("any").is_empty());
+        let s = scope::Scope::legacy();
+        assert!(cfg.allowed_origins_for(&s).is_empty());
+    }
+
+    #[test]
+    fn parse_scope_from_path_works() {
+        let s = super::parse_scope_from_path("/a/myapp/t/acme/v1/execute");
+        assert_eq!(s, Some(scope::Scope::new("myapp", "acme")));
+
+        let s = super::parse_scope_from_path("/v1/execute");
+        assert_eq!(s, None);
+
+        let s = super::parse_scope_from_path("/a/x/t/y/v1/receipt/b3:abc");
+        assert_eq!(s, Some(scope::Scope::new("x", "y")));
     }
 }
 
