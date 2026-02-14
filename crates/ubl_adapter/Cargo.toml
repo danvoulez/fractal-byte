@@ -1,0 +1,23 @@
+[package]
+name = "ubl_adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Wasm-safe adapters for UBL: HTTP and LLM with CID pinning"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
+hex = "0.4"
+thiserror = "1"
+
+# HTTP adapter (feature-gated — requires IO, not used inside Wasm)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+
+[features]
+default = []
+http = ["reqwest", "tokio"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
