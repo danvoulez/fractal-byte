@@ -1,6 +1,7 @@
 pub mod api;
 pub mod audit;
 pub mod error;
+pub mod idempotency;
 pub mod scope;
 
 use axum::http::HeaderValue;
@@ -290,6 +291,7 @@ pub struct AppState {
     pub auth_disabled: bool,
     pub rate_limiter: RateLimiter,
     pub cors_config: CorsConfig,
+    pub idempotency_store: idempotency::IdempotencyStore,
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
@@ -309,6 +311,7 @@ impl Default for AppState {
             auth_disabled,
             rate_limiter: RateLimiter::from_env(),
             cors_config: CorsConfig::from_env(),
+            idempotency_store: idempotency::IdempotencyStore::from_env(),
             metrics_handle: init_metrics(),
         }
     }
