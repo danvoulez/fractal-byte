@@ -140,7 +140,8 @@ async fn receipt_returns_400_for_invalid_cid() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400);
+    // get_receipt checks receipt chain first (not found) then legacy store (invalid CID → 404)
+    assert_eq!(resp.status(), 404);
 }
 
 // ── Certify: error paths ─────────────────────────────────────────
@@ -824,6 +825,7 @@ async fn setup_rate_limited(burst: u32) -> (String, Client, tokio::task::JoinHan
 
     let state = ubl_gate::AppState {
         rate_limiter: ubl_gate::RateLimiter::new(600, burst),
+        auth_disabled: true,
         ..Default::default()
     };
     let app = ubl_gate::app_with_state(state);

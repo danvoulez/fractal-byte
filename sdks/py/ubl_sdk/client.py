@@ -73,6 +73,14 @@ class UBLClient:
         data = self._get("/healthz")
         return HealthResponse(ok=data.get("ok", False))
 
+    def list_receipts(self) -> dict[str, Any]:
+        """List all receipts in the registry."""
+        return self._get("/v1/receipts")
+
+    def get_audit(self) -> dict[str, Any]:
+        """Get the audit report."""
+        return self._get("/v1/audit")
+
     # ── Helpers ─────────────────────────────────────────────────────
 
     def execute_or_raise(self, req: ExecuteRequest) -> ExecuteResponse:
@@ -133,6 +141,14 @@ class UBLClient:
         """Async health check."""
         data = await self._aget("/healthz")
         return HealthResponse(ok=data.get("ok", False))
+
+    async def alist_receipts(self) -> dict[str, Any]:
+        """Async list all receipts."""
+        return await self._aget("/v1/receipts")
+
+    async def aget_audit(self) -> dict[str, Any]:
+        """Async get audit report."""
+        return await self._aget("/v1/audit")
 
     # ── HTTP internals ──────────────────────────────────────────────
 

@@ -127,7 +127,7 @@ pub fn generate_report(chain: &BTreeMap<String, Value>) -> AuditReport {
             .and_then(|c| c.as_str())
             .unwrap_or("");
         if let Some(body) = receipt.get("body") {
-            if let Ok(body_bytes) = serde_json::to_vec(body) {
+            if let Ok(body_bytes) = ubl_runtime::canon::canonical_bytes(body) {
                 let hash = blake3::hash(&body_bytes);
                 let computed = format!("b3:{}", hex::encode(hash.as_bytes()));
                 if computed == claimed_body_cid {

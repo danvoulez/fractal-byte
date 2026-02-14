@@ -95,6 +95,14 @@ export interface HealthResponse {
   ok: boolean;
 }
 
+export interface AuditReport {
+  summary: { total_receipts: number };
+  by_type: Record<string, number>;
+  by_decision: Record<string, number>;
+  timeline: Array<{ t: string; cid: string; decision?: string }>;
+  integrity: { valid: number; invalid: number };
+}
+
 // ── Errors ───────────────────────────────────────────────────────────
 
 export class UBLError extends Error {
@@ -173,6 +181,16 @@ export class UBLClient {
   /** Health check */
   async healthz(): Promise<HealthResponse> {
     return this.get<HealthResponse>("/healthz");
+  }
+
+  /** List all receipts in the registry */
+  async listReceipts(): Promise<Record<string, Receipt>> {
+    return this.get<Record<string, Receipt>>("/v1/receipts");
+  }
+
+  /** Get the audit report */
+  async getAudit(): Promise<AuditReport> {
+    return this.get<AuditReport>("/v1/audit");
   }
 
   // ── Helpers ──────────────────────────────────────────────────────

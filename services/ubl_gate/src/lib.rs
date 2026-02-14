@@ -254,9 +254,10 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        // SEC-3: Auth is ENABLED by default. Set UBL_AUTH_DISABLED=1 to disable.
         let auth_disabled = std::env::var("UBL_AUTH_DISABLED")
             .map(|v| v == "1")
-            .unwrap_or(true);
+            .unwrap_or(false);
         Self {
             transition_receipts: Default::default(),
             receipt_chain: Default::default(),
@@ -288,6 +289,9 @@ pub fn app_with_state(state: AppState) -> Router {
     let rl_state = state.clone();
     let _metrics_state = state.clone();
     let cors_config = state.cors_config.clone();
+    // Layer order: Axum applies layers in REVERSE order.
+    // Last .layer() = outermost (runs first).
+    // We want: CORS (outermost) → auth → metrics → rate_limit → content-type → timeout → body_limit
     Router::new()
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_endpoint))
@@ -302,6 +306,20 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/transition/:cid", get(api::get_transition))
         .route("/cid/:cid", get(api::get_cid_dispatch))
         .route("/.well-known/did.json", get(api::well_known_did_json))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
+        .layer(middleware::from_fn(require_json_content_type))
+        .layer(middleware::from_fn(move |req, next| {
+            let st = rl_state.clone();
+            rate_limit_middleware(st, req, next)
+        }))
+        .layer(middleware::from_fn(metrics_middleware))
+        .layer(middleware::from_fn(move |req, next| {
+            let st = auth_state.clone();
+            require_bearer_auth(st, req, next)
+        }))
+        // CORS must be outermost (last .layer()) so preflight OPTIONS
+        // are handled BEFORE auth/rate-limit/content-type checks.
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::AllowOrigin::predicate(
@@ -332,23 +350,16 @@ pub fn app_with_state(state: AppState) -> Router {
                 ])
                 .max_age(Duration::from_secs(3600)),
         )
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
-        .layer(middleware::from_fn(require_json_content_type))
-        .layer(middleware::from_fn(move |req, next| {
-            let st = rl_state.clone();
-            rate_limit_middleware(st, req, next)
-        }))
-        .layer(middleware::from_fn(metrics_middleware))
-        .layer(middleware::from_fn(move |req, next| {
-            let st = auth_state.clone();
-            require_bearer_auth(st, req, next)
-        }))
         .with_state(state)
 }
 
 /// Middleware: reject POST/PUT requests without application/json content-type.
+/// OPTIONS requests are always passed through (CORS preflight).
 async fn require_json_content_type(req: Request, next: Next) -> Response {
+    // Always pass OPTIONS through (CORS preflight)
+    if req.method() == axum::http::Method::OPTIONS {
+        return next.run(req).await;
+    }
     let dominated_by_json = match req.method().as_str() {
         "POST" | "PUT" | "PATCH" => req
             .headers()
@@ -375,6 +386,10 @@ const PUBLIC_PATHS: &[&str] = &["/healthz", "/.well-known/did.json", "/metrics"]
 async fn require_bearer_auth(state: AppState, mut req: Request, next: Next) -> Response {
     // Skip auth if disabled (dev/test mode)
     if state.auth_disabled {
+        return next.run(req).await;
+    }
+    // Skip OPTIONS (CORS preflight) — no Bearer token expected
+    if req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }
     // Skip auth for public paths
@@ -565,10 +580,33 @@ pub mod test {
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
 
-    /// Spawn the server on a random port. Returns the address and a
-    /// JoinHandle that keeps the server alive until dropped.
+    /// Spawn the server on a random port with auth disabled (for tests).
+    /// Returns the address and a JoinHandle that keeps the server alive until dropped.
     pub async fn spawn() -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        let app = super::app();
+        let state = super::AppState {
+            auth_disabled: true, // tests run without auth by default
+            ..super::AppState::default()
+        };
+        let app = super::app_with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, handle)
+    }
+
+    /// Spawn the server with auth ENABLED and the given token store.
+    /// For testing auth flows.
+    pub async fn spawn_with_auth(
+        token_store: super::TokenStore,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let state = super::AppState {
+            auth_disabled: false,
+            token_store,
+            ..super::AppState::default()
+        };
+        let app = super::app_with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {

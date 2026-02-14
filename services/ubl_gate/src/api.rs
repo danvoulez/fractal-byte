@@ -14,6 +14,15 @@ use ubl_ai_nrf1::nrf::{self, NrfValue};
 use ubl_ai_nrf1::nrf::{cid_from_nrf_bytes, encode_to_vec, json_to_nrf};
 use ubl_config::BASE_URL;
 
+/// Normalize a CID extracted from a URL path segment.
+/// Handles: percent-encoding (b3%3A… → b3:…) and optional "cid:" prefix.
+fn normalize_cid_in_path(raw: &str) -> String {
+    let decoded = urlencoding::decode(raw)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| raw.to_string());
+    decoded.strip_prefix("cid:").unwrap_or(&decoded).to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct IngestReq {
     pub payload: Value,
@@ -67,8 +76,9 @@ async fn resolve_raw(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
 
 pub async fn get_cid_dispatch(
     client: Option<Extension<ClientInfo>>,
-    Path(cid_str): Path<String>,
+    Path(cid_raw): Path<String>,
 ) -> impl IntoResponse {
+    let cid_str = normalize_cid_in_path(&cid_raw);
     let tenant = client
         .as_ref()
         .map(|Extension(ci)| ci.tenant_id.as_str())
@@ -160,10 +170,51 @@ pub async fn certify_cid(
     }
 }
 
-pub async fn get_receipt(Path(cid_str): Path<String>) -> impl IntoResponse {
+pub async fn get_receipt(
+    State(state): State<AppState>,
+    client: Option<Extension<ClientInfo>>,
+    Path(cid_raw): Path<String>,
+) -> impl IntoResponse {
+    let cid_str = normalize_cid_in_path(&cid_raw);
+    let tenant = client
+        .as_ref()
+        .map(|Extension(ci)| ci.tenant_id.as_str())
+        .unwrap_or("default");
+
+    // First check the receipt chain (populated by /v1/execute)
+    {
+        let store = state.receipt_chain.read().unwrap();
+        if let Some(receipt) = store.get(&cid_str) {
+            // Tenant isolation: check __tenant_id
+            let receipt_tenant = receipt
+                .get("__tenant_id")
+                .and_then(|t| t.as_str())
+                .unwrap_or("default");
+            if receipt_tenant != tenant {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "receipt not found"})),
+                )
+                    .into_response();
+            }
+            let mut clean = receipt.clone();
+            if let Some(obj) = clean.as_object_mut() {
+                obj.remove("__tenant_id");
+            }
+            return (StatusCode::OK, Json(clean)).into_response();
+        }
+    }
+
+    // Fallback: legacy receipt store (ubl_receipt)
     let cid = match Cid::try_from(cid_str.as_str()) {
         Ok(c) => c,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid CID").into_response(),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "receipt not found"})),
+            )
+                .into_response()
+        }
     };
     match ubl_receipt::get_receipt(&cid).await {
         Some(jws) => (
@@ -172,7 +223,11 @@ pub async fn get_receipt(Path(cid_str): Path<String>) -> impl IntoResponse {
             jws,
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, "receipt not found").into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "receipt not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -273,18 +328,56 @@ pub async fn execute_rb(
 
 pub async fn list_receipts(
     State(state): State<AppState>,
+    client: Option<Extension<ClientInfo>>,
 ) -> impl IntoResponse {
+    let tenant = client
+        .as_ref()
+        .map(|Extension(ci)| ci.tenant_id.as_str())
+        .unwrap_or("default");
     let store = state.receipt_chain.read().unwrap();
-    (StatusCode::OK, Json(json!(*store)))
+    let filtered: serde_json::Map<String, Value> = store
+        .iter()
+        .filter(|(_k, v)| {
+            v.get("__tenant_id")
+                .and_then(|t| t.as_str())
+                .map(|t| t == tenant)
+                .unwrap_or(true) // legacy receipts without tenant tag are visible to all
+        })
+        .map(|(k, v)| {
+            let mut clean = v.clone();
+            if let Some(obj) = clean.as_object_mut() {
+                obj.remove("__tenant_id");
+            }
+            (k.clone(), clean)
+        })
+        .collect();
+    (StatusCode::OK, Json(json!(filtered)))
 }
 
 pub async fn audit_report(
     State(state): State<AppState>,
+    client: Option<Extension<ClientInfo>>,
 ) -> impl IntoResponse {
+    let tenant = client
+        .as_ref()
+        .map(|Extension(ci)| ci.tenant_id.as_str())
+        .unwrap_or("default");
     let store = state.receipt_chain.read().unwrap();
     let chain: BTreeMap<String, Value> = store
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .filter(|(_k, v)| {
+            v.get("__tenant_id")
+                .and_then(|t| t.as_str())
+                .map(|t| t == tenant)
+                .unwrap_or(true)
+        })
+        .map(|(k, v)| {
+            let mut clean = v.clone();
+            if let Some(obj) = clean.as_object_mut() {
+                obj.remove("__tenant_id");
+            }
+            (k.clone(), clean)
+        })
         .collect();
     let report = crate::audit::generate_report(&chain);
     (StatusCode::OK, Json(json!(report)))
@@ -292,8 +385,9 @@ pub async fn audit_report(
 
 pub async fn get_transition(
     State(state): State<AppState>,
-    Path(cid): Path<String>,
+    Path(cid_raw): Path<String>,
 ) -> impl IntoResponse {
+    let cid = normalize_cid_in_path(&cid_raw);
     let store = state.transition_receipts.read().unwrap();
     match store.get(&cid) {
         Some(envelope) => (StatusCode::OK, Json(envelope.clone())).into_response(),
@@ -350,20 +444,32 @@ pub async fn execute_runtime(
 
     match ubl_runtime::run_with_receipts(&req.manifest, &req.vars, &cfg, &opts) {
         Ok(run) => {
+            let tenant = client
+                .as_ref()
+                .map(|Extension(ci)| ci.tenant_id.clone())
+                .unwrap_or_else(|| "default".to_string());
+
             // Store receipts + update seen_cids + update last_tip (unless ghost)
             if !run.ghost {
                 let mut store = state.receipt_chain.write().unwrap();
-                store.insert(
-                    run.wa.body_cid.clone(),
-                    serde_json::to_value(&run.wa).unwrap(),
-                );
-                if let Some(ref tr) = run.transition {
-                    store.insert(tr.body_cid.clone(), serde_json::to_value(tr).unwrap());
+                // Tag each receipt with __tenant_id for tenant isolation
+                for (cid, val) in [
+                    (&run.wa.body_cid, serde_json::to_value(&run.wa).unwrap()),
+                    (&run.wf.body_cid, serde_json::to_value(&run.wf).unwrap()),
+                ] {
+                    let mut v = val;
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("__tenant_id".into(), json!(tenant));
+                    }
+                    store.insert(cid.clone(), v);
                 }
-                store.insert(
-                    run.wf.body_cid.clone(),
-                    serde_json::to_value(&run.wf).unwrap(),
-                );
+                if let Some(ref tr) = run.transition {
+                    let mut v = serde_json::to_value(tr).unwrap();
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("__tenant_id".into(), json!(tenant));
+                    }
+                    store.insert(tr.body_cid.clone(), v);
+                }
             }
 
             // Track idempotency key: pipeline:inputs_raw_cid

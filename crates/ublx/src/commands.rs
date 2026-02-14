@@ -38,6 +38,49 @@ impl Client {
     }
 }
 
+// ── ingest ──────────────────────────────────────────────────────
+
+pub fn ingest(client: &Client, file: &str, certify: bool) -> Result<(), String> {
+    let content = if file == "-" {
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)
+            .map_err(|e| format!("read stdin: {e}"))?;
+        buf
+    } else {
+        fs::read_to_string(file)
+            .map_err(|e| format!("read file: {e}"))?
+    };
+    let payload: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse JSON: {e}"))?;
+
+    let body = serde_json::json!({
+        "payload": payload,
+        "certify": certify,
+    });
+
+    let resp = client.post("/v1/ingest", &body)?;
+    let status = resp.status();
+    let json: Value = resp.json().map_err(|e| format!("parse response: {e}"))?;
+
+    if status.is_success() {
+        let cid = json.get("cid").and_then(|c| c.as_str()).unwrap_or("?");
+        let tenant = json.get("tenant_id").and_then(|t| t.as_str()).unwrap_or("?");
+        println!("{} {}", "CID:   ".dimmed(), cid.cyan());
+        println!("{} {}", "Tenant:".dimmed(), tenant.dimmed());
+        if certify {
+            println!("{}", "  (certified)".green());
+        }
+    } else {
+        let code = status.as_u16();
+        let detail = json.get("error").or_else(|| json.get("detail"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("HTTP {code}: {detail}"));
+    }
+
+    Ok(())
+}
+
 // ── execute ─────────────────────────────────────────────────────
 
 pub fn execute(client: &Client, manifest_path: &str, vars_path: &str, ghost: bool) -> Result<(), String> {
@@ -122,7 +165,8 @@ pub fn receipt(client: &Client, cid: &str) -> Result<(), String> {
     let json: Value = resp.json().map_err(|e| format!("parse: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("receipt not found: {cid}"));
+        let code = status.as_u16();
+        return Err(format!("HTTP {code}: receipt not found: {cid}"));
     }
 
     print_receipt(&json);
@@ -137,7 +181,8 @@ pub fn receipts(client: &Client) -> Result<(), String> {
     let json: Value = resp.json().map_err(|e| format!("parse: {e}"))?;
 
     if !status.is_success() {
-        return Err("failed to list receipts".into());
+        let code = status.as_u16();
+        return Err(format!("HTTP {code}: failed to list receipts"));
     }
 
     let map = json.as_object().ok_or("expected object")?;
@@ -190,7 +235,8 @@ pub fn transition(client: &Client, cid: &str) -> Result<(), String> {
     let json: Value = resp.json().map_err(|e| format!("parse: {e}"))?;
 
     if !status.is_success() {
-        return Err(format!("transition not found: {cid}"));
+        let code = status.as_u16();
+        return Err(format!("HTTP {code}: transition not found: {cid}"));
     }
 
     println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
@@ -250,6 +296,71 @@ pub fn verify(file: &str) -> Result<(), String> {
         println!("  {} no signature", "⚠".yellow());
     }
 
+    Ok(())
+}
+
+// ── audit ───────────────────────────────────────────────────────
+
+pub fn audit(client: &Client) -> Result<(), String> {
+    let resp = client.get("/v1/audit")?;
+    let status = resp.status();
+    let json: Value = resp.json().map_err(|e| format!("parse: {e}"))?;
+
+    if !status.is_success() {
+        let code = status.as_u16();
+        let detail = json.get("error").and_then(|d| d.as_str()).unwrap_or("unknown");
+        return Err(format!("HTTP {code}: {detail}"));
+    }
+
+    // Summary
+    if let Some(summary) = json.get("summary") {
+        println!("{}", "Audit Summary".bold());
+        let total = summary.get("total_receipts").and_then(|t| t.as_u64()).unwrap_or(0);
+        println!("  {} {}", "Total receipts:".dimmed(), total);
+    }
+
+    // By decision
+    if let Some(by_dec) = json.get("by_decision").and_then(|d| d.as_object()) {
+        println!("  {}:", "By decision".dimmed());
+        for (dec, count) in by_dec {
+            let badge = match dec.as_str() {
+                "ALLOW" => dec.green().bold(),
+                "DENY" => dec.red().bold(),
+                _ => dec.yellow().bold(),
+            };
+            println!("    {badge} {count}");
+        }
+    }
+
+    // Integrity
+    if let Some(integrity) = json.get("integrity") {
+        let valid = integrity.get("valid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let invalid = integrity.get("invalid").and_then(|v| v.as_u64()).unwrap_or(0);
+        if invalid == 0 {
+            println!("  {} {} valid, {} invalid", "\u{2713}".green(), valid, invalid);
+        } else {
+            println!("  {} {} valid, {} invalid", "\u{2717}".red(), valid, invalid);
+        }
+    }
+
+    Ok(())
+}
+
+// ── resolve ─────────────────────────────────────────────────────
+
+pub fn resolve(client: &Client, id: &str) -> Result<(), String> {
+    let body = serde_json::json!({ "id": id });
+    let resp = client.post("/v1/resolve", &body)?;
+    let status = resp.status();
+    let json: Value = resp.json().map_err(|e| format!("parse: {e}"))?;
+
+    if !status.is_success() {
+        let code = status.as_u16();
+        let detail = json.get("error").and_then(|d| d.as_str()).unwrap_or("unknown");
+        return Err(format!("HTTP {code}: {detail}"));
+    }
+
+    println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
     Ok(())
 }
 

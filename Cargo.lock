@@ -3471,6 +3471,7 @@ dependencies = [
  "ubl_ledger",
  "ubl_receipt",
  "ubl_runtime",
+ "urlencoding",
 ]
 
 [[package]]
