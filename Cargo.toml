@@ -2,6 +2,7 @@
 [workspace]
 members = [
   "crates/ubl_adapter",
+  "crates/ublx",
   "crates/ubl_ai_nrf1",
   "crates/ubl_ledger",
   "crates/ubl_receipt",
