@@ -5,11 +5,13 @@ pub mod engine;
 pub mod error;
 pub mod jws;
 pub mod nrf_canon;
+pub mod policy;
 pub mod rb_bridge;
 pub mod receipt;
 pub mod transition;
 
-pub use engine::{execute, ExecuteConfig, ExecuteResult, Grammar, Manifest, Policy};
+pub use engine::{execute, execute_with_cascade, ExecuteConfig, ExecuteResult, Grammar, Manifest, Policy};
+pub use policy::{resolve as resolve_policy, CascadePolicy, PolicyResult, PolicyRule, PolicyTraceEntry};
 pub use rb_bridge::{execute_rb, ExecuteRbReq, ExecuteRbRes};
 pub use receipt::{
     build_receipt, run_with_receipts, run_with_receipts_simple, validate_receipt, verify_body_cid,

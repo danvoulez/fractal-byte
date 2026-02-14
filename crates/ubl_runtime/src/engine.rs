@@ -44,6 +44,9 @@ pub struct ExecuteResult {
     pub artifacts: Artifacts,
     pub dimension_stack: Vec<String>,
     pub cid: String,
+    /// Policy trace from cascade evaluation (empty for legacy mode).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_trace: Vec<crate::policy::PolicyTraceEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,10 +105,18 @@ pub fn execute(
         })?
         .clone();
 
-    // policy
-    if !manifest.policy.allow {
-        return Err(RuntimeError::Validation("policy deny".into()));
+    // policy — evaluate via cascade resolver for backward compat
+    let cascade = crate::policy::CascadePolicy {
+        allow: manifest.policy.allow,
+        rules: vec![],
+    };
+    let policy_result = crate::policy::resolve(&cascade, vars, None);
+    if policy_result.decision == "DENY" {
+        return Err(RuntimeError::PolicyDeny(
+            policy_result.reason.unwrap_or_else(|| "policy deny".into()),
+        ));
     }
+    let policy_trace = policy_result.policy_trace;
 
     // render: feed only previous stage output via 1<->1 to grammar input
     let mut render_vars = BTreeMap::new();
@@ -136,6 +147,73 @@ pub fn execute(
         },
         dimension_stack: vec!["parse".into(), "policy".into(), "render".into()],
         cid,
+        policy_trace,
+    })
+}
+
+/// Execute with a full cascade policy (rules + trace).
+pub fn execute_with_cascade(
+    manifest: &Manifest,
+    vars: &BTreeMap<String, Value>,
+    _cfg: &ExecuteConfig,
+    cascade: &crate::policy::CascadePolicy,
+    body_size: Option<usize>,
+) -> Result<ExecuteResult> {
+    // parse
+    let mut ctx: BTreeMap<String, Value> = BTreeMap::new();
+    let bound = bind_vars_to_inputs(vars, &manifest.in_grammar.inputs)?;
+    for (k, v) in bound {
+        ctx.insert(k, v);
+    }
+    apply_mappings(&mut ctx, &manifest.in_grammar.mappings)?;
+    let parse_out = ctx
+        .get(&manifest.in_grammar.output_from)
+        .ok_or_else(|| {
+            RuntimeError::Validation(format!(
+                "parse: missing '{}'",
+                manifest.in_grammar.output_from
+            ))
+        })?
+        .clone();
+
+    // policy — full cascade evaluation
+    let policy_result = crate::policy::resolve(cascade, vars, body_size);
+    if policy_result.decision == "DENY" {
+        return Err(RuntimeError::PolicyDeny(
+            policy_result.reason.unwrap_or_else(|| "policy deny".into()),
+        ));
+    }
+    let policy_trace = policy_result.policy_trace;
+
+    // render
+    let mut render_vars = BTreeMap::new();
+    render_vars.insert("__prev_output__".into(), parse_out.clone());
+    let bound = bind_vars_to_inputs(&render_vars, &manifest.out_grammar.inputs)?;
+    for (k, v) in bound {
+        ctx.insert(k, v);
+    }
+    apply_mappings(&mut ctx, &manifest.out_grammar.mappings)?;
+    let final_out = ctx
+        .get(&manifest.out_grammar.output_from)
+        .ok_or_else(|| {
+            RuntimeError::Validation(format!(
+                "render: missing '{}'",
+                manifest.out_grammar.output_from
+            ))
+        })?
+        .clone();
+
+    let bytes = crate::canon::canonical_bytes(&final_out)?;
+    let cid = cid_b3(&bytes);
+
+    Ok(ExecuteResult {
+        artifacts: Artifacts {
+            output: final_out,
+            sub_receipts: vec![],
+        },
+        dimension_stack: vec!["parse".into(), "policy".into(), "render".into()],
+        cid,
+        policy_trace,
     })
 }
 
