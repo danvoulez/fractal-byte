@@ -13,15 +13,24 @@ use ubl_config::BASE_URL;
 #[derive(Debug, Deserialize)]
 pub struct IngestReq { pub payload: Value, pub certify: Option<bool> }
 
-pub async fn ingest(Json(req): Json<IngestReq>) -> impl IntoResponse {
+pub async fn ingest(
+    client: Option<Extension<ClientInfo>>,
+    Json(req): Json<IngestReq>,
+) -> impl IntoResponse {
+    let tenant = client.as_ref().map(|Extension(ci)| ci.tenant_id.as_str()).unwrap_or("default");
     let nrf_val = match json_to_nrf(&req.payload) { Ok(v)=>v, Err(e)=> return (StatusCode::BAD_REQUEST, e.to_string()).into_response() };
     let nrf_bytes = match encode_to_vec(&nrf_val) { Ok(b)=>b, Err(e)=> return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response() };
     let cid = cid_from_nrf_bytes(&nrf_bytes);
-    if !ubl_ledger::exists(&cid).await { if let Err(e)=ubl_ledger::put(&cid, &nrf_bytes).await { return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(); } }
+    if !ubl_ledger::tenant_exists(tenant, &cid).await {
+        if let Err(e) = ubl_ledger::tenant_put(tenant, &cid, &nrf_bytes).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
     if req.certify.unwrap_or(false) { let _ = ubl_receipt::issue_receipt(&cid, nrf_bytes.len()).await; }
     let resp = json!({
         "cid": cid.to_string(),
         "did": format!("did:cid:{}", cid),
+        "tenant_id": tenant,
         "bytes_len": nrf_bytes.len(),
         "content_type": "application/x-nrf",
         "url": format!("{}/cid/{}", BASE_URL.as_str(), cid),
@@ -30,16 +39,26 @@ pub async fn ingest(Json(req): Json<IngestReq>) -> impl IntoResponse {
     (StatusCode::OK, Json(resp)).into_response()
 }
 
-pub async fn get_cid_dispatch(Path(cid_str): Path<String>) -> impl IntoResponse {
-    if let Some(bare) = cid_str.strip_suffix(".json") {
-        return get_cid_json_inner(bare).await;
-    }
-    get_cid_inner(&cid_str).await
+/// Resolve raw bytes for a CID: try tenant path first, then legacy.
+async fn resolve_raw(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
+    if let Some(b) = ubl_ledger::tenant_get_raw(tenant, cid).await { return Some(b); }
+    ubl_ledger::get_raw(cid).await
 }
 
-async fn get_cid_inner(cid_str: &str) -> axum::response::Response {
+pub async fn get_cid_dispatch(
+    client: Option<Extension<ClientInfo>>,
+    Path(cid_str): Path<String>,
+) -> impl IntoResponse {
+    let tenant = client.as_ref().map(|Extension(ci)| ci.tenant_id.as_str()).unwrap_or("default");
+    if let Some(bare) = cid_str.strip_suffix(".json") {
+        return get_cid_json_inner(tenant, bare).await;
+    }
+    get_cid_inner(tenant, &cid_str).await
+}
+
+async fn get_cid_inner(tenant: &str, cid_str: &str) -> axum::response::Response {
     let cid = match Cid::try_from(cid_str) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
-    match ubl_ledger::get_raw(&cid).await {
+    match resolve_raw(tenant, &cid).await {
         Some(bytes) => {
             ([
                 (header::CONTENT_TYPE, "application/x-nrf"),
@@ -49,9 +68,9 @@ async fn get_cid_inner(cid_str: &str) -> axum::response::Response {
     }
 }
 
-async fn get_cid_json_inner(cid_str: &str) -> axum::response::Response {
+async fn get_cid_json_inner(tenant: &str, cid_str: &str) -> axum::response::Response {
     let cid = match Cid::try_from(cid_str) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
-    let bytes = match ubl_ledger::get_raw(&cid).await { Some(b)=>b, None=> return (StatusCode::NOT_FOUND, "not found").into_response() };
+    let bytes = match resolve_raw(tenant, &cid).await { Some(b)=>b, None=> return (StatusCode::NOT_FOUND, "not found").into_response() };
     if let Ok(nrf_val) = nrf::decode_from_slice(&bytes) {
         return (StatusCode::OK, Json(nrf_value_to_json(&nrf_val))).into_response();
     }
@@ -81,10 +100,14 @@ fn nrf_value_to_json(v: &NrfValue) -> Value {
     }
 }
 
-pub async fn certify_cid(Json(payload): Json<Value>) -> impl IntoResponse {
+pub async fn certify_cid(
+    client: Option<Extension<ClientInfo>>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let tenant = client.as_ref().map(|Extension(ci)| ci.tenant_id.as_str()).unwrap_or("default");
     let cid_str = match payload.get("cid").and_then(|v| v.as_str()) { Some(s)=>s, None=> return (StatusCode::BAD_REQUEST, "missing cid").into_response() };
     let cid = match Cid::try_from(cid_str) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
-    let bytes = match ubl_ledger::get_raw(&cid).await { Some(b)=>b, None=> return (StatusCode::NOT_FOUND, "content not found").into_response() };
+    let bytes = match resolve_raw(tenant, &cid).await { Some(b)=>b, None=> return (StatusCode::NOT_FOUND, "content not found").into_response() };
     match ubl_receipt::issue_receipt(&cid, bytes.len()).await {
         Ok(jws) => Json(json!({ "receipt": jws })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("certify failed: {}", e)).into_response(),

@@ -455,6 +455,7 @@ async fn setup_auth_kid_scoped(allowed_kids: Vec<String>) -> (String, Client, to
     // Register a scoped token that only allows specific kids
     state.token_store.register("scoped-token-001", ubl_gate::ClientInfo {
         client_id: "scoped-client".into(),
+        tenant_id: "test-tenant".into(),
         allowed_kids,
     });
     let app = ubl_gate::app_with_state(state);
@@ -605,6 +606,157 @@ async fn policy_deny_produces_deny_receipt_with_chain() {
     let wf_p0 = body["receipts"]["wf"]["parents"][0].as_str().unwrap();
     assert_eq!(wf_p0, wa_cid, "DENY wf.parents[0] == wa.body_cid");
     assert!(body["tip_cid"].as_str().unwrap().starts_with("b3:"));
+}
+
+// ── Rate limiting tests ──────────────────────────────────────────
+
+async fn setup_rate_limited(burst: u32) -> (String, Client, tokio::task::JoinHandle<()>) {
+    use tokio::net::TcpListener;
+
+    let mut state = ubl_gate::AppState::default();
+    state.rate_limiter = ubl_gate::RateLimiter::new(600, burst); // high rpm, low burst
+    let app = ubl_gate::app_with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{}", addr), Client::new(), handle)
+}
+
+#[tokio::test]
+async fn rate_limit_allows_within_burst() {
+    let (base, http, _h) = setup_rate_limited(5).await;
+    for i in 0..5 {
+        let resp = http.post(format!("{}/v1/ingest", base))
+            .json(&json!({"payload": {"rl_test": i}}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200, "request {} within burst must succeed", i);
+        assert!(resp.headers().contains_key("x-ratelimit-limit"));
+        assert!(resp.headers().contains_key("x-ratelimit-remaining"));
+    }
+}
+
+#[tokio::test]
+async fn rate_limit_429_on_burst_exceeded() {
+    let (base, http, _h) = setup_rate_limited(3).await;
+    // Consume the burst
+    for i in 0..3 {
+        let resp = http.post(format!("{}/v1/ingest", base))
+            .json(&json!({"payload": {"rl_burst": i}}))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200, "request {} within burst", i);
+    }
+    // 4th request should be rate limited
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .json(&json!({"payload": {"rl_burst": "overflow"}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 429, "request beyond burst must return 429");
+    assert!(resp.headers().contains_key("retry-after"));
+    assert_eq!(
+        resp.headers().get("x-ratelimit-remaining").unwrap().to_str().unwrap(),
+        "0"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "rate_limit_exceeded");
+    assert_eq!(body["receipt"]["body"]["decision"], "DENY");
+    assert_eq!(body["receipt"]["body"]["reason"], "RATE_LIMIT");
+    assert_eq!(body["receipt"]["body"]["recommended_action"], "retry_after");
+}
+
+#[tokio::test]
+async fn rate_limit_healthz_exempt() {
+    let (base, http, _h) = setup_rate_limited(1).await;
+    // Consume the single token
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .json(&json!({"payload": {"rl_exempt": true}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    // healthz should still work (exempt from rate limiting)
+    let resp = http.get(format!("{}/healthz", base)).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "healthz must be exempt from rate limiting");
+}
+
+// ── Tenant isolation tests ───────────────────────────────────────
+
+async fn setup_multi_tenant() -> (String, Client, tokio::task::JoinHandle<()>) {
+    use tokio::net::TcpListener;
+
+    let mut state = ubl_gate::AppState::default();
+    state.auth_disabled = false;
+    // Two tokens with different tenants
+    state.token_store.register("tenant-a-token", ubl_gate::ClientInfo {
+        client_id: "client-a".into(),
+        tenant_id: "tenant-alpha".into(),
+        allowed_kids: vec![],
+    });
+    state.token_store.register("tenant-b-token", ubl_gate::ClientInfo {
+        client_id: "client-b".into(),
+        tenant_id: "tenant-beta".into(),
+        allowed_kids: vec![],
+    });
+    let app = ubl_gate::app_with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{}", addr), Client::new(), handle)
+}
+
+#[tokio::test]
+async fn tenant_isolation_same_payload_different_tenants() {
+    let (base, http, _h) = setup_multi_tenant().await;
+    let payload = json!({"payload": {"shared_data": "hello"}});
+
+    // Tenant A ingests
+    let resp_a = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer tenant-a-token")
+        .json(&payload)
+        .send().await.unwrap();
+    assert_eq!(resp_a.status(), 200);
+    let body_a: Value = resp_a.json().await.unwrap();
+    assert_eq!(body_a["tenant_id"], "tenant-alpha");
+    let cid_a = body_a["cid"].as_str().unwrap().to_string();
+
+    // Tenant B ingests the same payload
+    let resp_b = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer tenant-b-token")
+        .json(&payload)
+        .send().await.unwrap();
+    assert_eq!(resp_b.status(), 200);
+    let body_b: Value = resp_b.json().await.unwrap();
+    assert_eq!(body_b["tenant_id"], "tenant-beta");
+
+    // Same CID (same content) but stored in different tenant paths
+    assert_eq!(body_a["cid"], body_b["cid"], "same payload → same CID");
+
+    // Tenant A can read its own data
+    let get_a = http.get(format!("{}/cid/{}", base, cid_a))
+        .header("authorization", "Bearer tenant-a-token")
+        .send().await.unwrap();
+    assert_eq!(get_a.status(), 200, "tenant A can read its own CID");
+
+    // Tenant B can also read (same CID, different tenant path)
+    let get_b = http.get(format!("{}/cid/{}", base, cid_a))
+        .header("authorization", "Bearer tenant-b-token")
+        .send().await.unwrap();
+    assert_eq!(get_b.status(), 200, "tenant B can read its own CID");
+}
+
+#[tokio::test]
+async fn tenant_ingest_returns_tenant_id() {
+    let (base, http, _h) = setup_multi_tenant().await;
+    let resp = http.post(format!("{}/v1/ingest", base))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer tenant-a-token")
+        .json(&json!({"payload": {"tenant_check": true}}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["tenant_id"], "tenant-alpha", "response must include tenant_id");
 }
 
 // ── Healthz ──────────────────────────────────────────────────────

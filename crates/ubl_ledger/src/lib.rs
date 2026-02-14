@@ -17,6 +17,16 @@ fn receipt_path(cid: &Cid) -> PathBuf {
     PathBuf::from(RECEIPT_DIR).join(format!("{}.json", cid))
 }
 
+fn tenant_cid_path(tenant: &str, cid: &Cid, ext: &str) -> PathBuf {
+    let s = cid.to_string();
+    let (p1, p2) = (&s[2..4], &s[4..6]);
+    PathBuf::from(STORE_DIR).join(tenant).join(p1).join(p2).join(format!("{}.{}", s, ext))
+}
+
+fn tenant_receipt_path(tenant: &str, cid: &Cid) -> PathBuf {
+    PathBuf::from(RECEIPT_DIR).join(tenant).join(format!("{}.json", cid))
+}
+
 pub async fn put(cid: &Cid, bytes: &[u8]) -> Result<()> {
     let path = cid_path(cid, "nrf");
     fs::create_dir_all(path.parent().unwrap()).await?;
@@ -41,6 +51,34 @@ pub async fn put_receipt(cid: &Cid, bytes: &[u8]) -> Result<()> {
 
 pub async fn get_receipt(cid: &Cid) -> Option<Vec<u8>> {
     fs::read(receipt_path(cid)).await.ok()
+}
+
+// ── Tenant-scoped operations ────────────────────────────────────────
+
+pub async fn tenant_put(tenant: &str, cid: &Cid, bytes: &[u8]) -> Result<()> {
+    let path = tenant_cid_path(tenant, cid, "nrf");
+    fs::create_dir_all(path.parent().unwrap()).await?;
+    fs::write(path, bytes).await?;
+    Ok(())
+}
+
+pub async fn tenant_exists(tenant: &str, cid: &Cid) -> bool {
+    fs::try_exists(tenant_cid_path(tenant, cid, "nrf")).await.unwrap_or(false)
+}
+
+pub async fn tenant_get_raw(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
+    fs::read(tenant_cid_path(tenant, cid, "nrf")).await.ok()
+}
+
+pub async fn tenant_put_receipt(tenant: &str, cid: &Cid, bytes: &[u8]) -> Result<()> {
+    let path = tenant_receipt_path(tenant, cid);
+    fs::create_dir_all(path.parent().unwrap()).await?;
+    fs::write(path, bytes).await?;
+    Ok(())
+}
+
+pub async fn tenant_get_receipt(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
+    fs::read(tenant_receipt_path(tenant, cid)).await.ok()
 }
 
 // ── S3 backend (feature-gated) ──────────────────────────────────────

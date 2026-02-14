@@ -20,7 +20,9 @@ ubl_did = { path = "../../crates/ubl_did" }
 ubl_config = { path = "../../crates/ubl_config" }
 ubl_runtime = { path = "../../crates/ubl_runtime" }
 rb_vm = { path = "../../crates/rb_vm" }
-tower-http = { version = "0.5", features = ["limit", "timeout"] }
+tower-http = { version = "0.5", features = ["limit", "timeout", "cors"] }
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", features = ["http-listener"] }
 blake3 = "1"
 hex = "0.4"
 base64 = "0.22"

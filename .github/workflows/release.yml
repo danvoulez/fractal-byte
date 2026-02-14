@@ -1,0 +1,60 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  build-and-release:
+    name: Build + GitHub Release
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p ubl_gate
+          cargo build --release -p ubl
+
+      - name: Package binaries
+        id: package
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
+          TAG="v0.1.0-${SHORT_SHA}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          cp target/release/ubl_gate dist/
+          cp target/release/ubl dist/
+          echo "${SHORT_SHA}" > dist/VERSION
+          tar czf ubl-darwin-arm64.tar.gz -C dist .
+          shasum -a 256 ubl-darwin-arm64.tar.gz > ubl-darwin-arm64.tar.gz.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: "UBL ${{ steps.package.outputs.tag }}"
+          body: "Automated build from commit ${{ github.sha }}"
+          files: |
+            ubl-darwin-arm64.tar.gz
+            ubl-darwin-arm64.tar.gz.sha256
+          make_latest: true

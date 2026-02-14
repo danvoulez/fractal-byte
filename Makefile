@@ -1,5 +1,5 @@
 
-.PHONY: build test run race conformance validate docs docker e2e sdk-ts sdk-py auth-smoke compat
+.PHONY: build test run race conformance validate docs docker e2e sdk-ts sdk-py auth-smoke compat certs-dev
 
 build:
 	cargo build --workspace
@@ -54,6 +54,10 @@ sdk-py:
 	@echo "── Generating Python SDK ──"
 	openapi-python-client generate --path docs/OPENAPI.md --output-path sdk/py
 	@echo "  ✓ sdk/py/"
+
+certs-dev:
+	@echo "── Generating dev mTLS certificates ──"
+	bash scripts/certs-dev.sh certs/dev
 
 compat:
 	@echo "── Compat check: OpenAPI spec version ──"

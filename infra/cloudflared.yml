@@ -1,0 +1,36 @@
+# Cloudflare Tunnel config — UBL multi-service ingress
+# Tunnel ID: cc7bec20-2da9-45f9-8949-1ed4a3070ff8
+tunnel: ubl-tunnel
+credentials-file: /Users/danvoulez/.cloudflared/cc7bec20-2da9-45f9-8949-1ed4a3070ff8.json
+
+ingress:
+  # ── Public API (receipt-first gate) ──
+  - hostname: api.ubl.agency
+    service: http://localhost:3000
+
+  # ── Raw tunnel endpoint (same as API, for debug/internal) ──
+  - hostname: tunnel.ubl.agency
+    service: http://localhost:3000
+
+  # ── Prometheus metrics (gate /metrics) ──
+  - hostname: metrics.ubl.agency
+    service: http://localhost:3000
+
+  # ── MinIO console (S3 browser UI) ──
+  - hostname: minio.ubl.agency
+    service: http://localhost:9001
+
+  # ── Receipt UI (future: web dashboard) ──
+  - hostname: ui.ubl.agency
+    service: http://localhost:3001
+
+  # ── Ledger API (future: dedicated ledger service) ──
+  - hostname: ledger.ubl.agency
+    service: http://localhost:3002
+
+  # ── Webhooks receiver (future: GitHub/Stripe/etc) ──
+  - hostname: webhooks.ubl.agency
+    service: http://localhost:3003
+
+  # ── Catch-all ──
+  - service: http_status:404

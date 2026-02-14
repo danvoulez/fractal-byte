@@ -1,8 +1,24 @@
-
+# Build
 target/
+
+# Data
 store/
 index/
+ledger/
+
+# Secrets
+.env
+certs/
+
+# Infra runtime
+bin/
+*.pid
+
+# Editor / OS
 *.swp
 *.DS_Store
 *.log
-ledger/
+
+# PM2
+logs/
+.pm2/
