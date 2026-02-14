@@ -65,6 +65,21 @@ jobs:
       - name: Race condition test
         run: cargo test -p ubl_gate --test race_card -- --nocapture
 
+      - name: Policy cascade tests
+        run: cargo test -p ubl_runtime -- policy --nocapture
+
+      - name: Audit report tests
+        run: cargo test -p ubl_gate -- audit --nocapture
+
+      - name: CORS per-tenant tests
+        run: cargo test -p ubl_gate -- cors --nocapture
+
+      - name: Adapter HTTP + CID pinning tests
+        run: cargo test -p ubl_adapter -- --nocapture
+
+      - name: CLI ublx builds
+        run: cargo build -p ublx
+
   compat:
     name: Compat Suite
     needs: test
