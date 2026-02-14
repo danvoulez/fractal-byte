@@ -2,6 +2,7 @@ pub mod api;
 pub mod audit;
 pub mod error;
 pub mod idempotency;
+pub mod keyring_store;
 pub mod scope;
 
 use axum::http::HeaderValue;
@@ -387,6 +388,7 @@ pub struct AppState {
     pub receipt_chain: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     pub seen_cids: Arc<RwLock<HashSet<String>>>,
     pub keys: Arc<ubl_runtime::KeyRing>,
+    pub keyring_store: keyring_store::KeyRingStore,
     pub last_tip: Arc<RwLock<Option<String>>>,
     pub token_store: TokenStore,
     /// When true, auth middleware is bypassed (for tests / dev)
@@ -408,6 +410,7 @@ impl Default for AppState {
             receipt_chain: Default::default(),
             seen_cids: Default::default(),
             keys: Arc::new(ubl_runtime::KeyRing::dev()),
+            keyring_store: keyring_store::KeyRingStore::dev(),
             last_tip: Default::default(),
             token_store: TokenStore::with_dev_token(),
             auth_disabled,
