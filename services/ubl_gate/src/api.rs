@@ -271,6 +271,13 @@ pub async fn execute_rb(
     }
 }
 
+pub async fn list_receipts(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let store = state.receipt_chain.read().unwrap();
+    (StatusCode::OK, Json(json!(*store)))
+}
+
 pub async fn get_transition(
     State(state): State<AppState>,
     Path(cid): Path<String>,

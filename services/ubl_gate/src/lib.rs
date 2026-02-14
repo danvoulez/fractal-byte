@@ -199,6 +199,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/ingest", post(api::ingest))
         .route("/v1/certify", post(api::certify_cid))
+        .route("/v1/receipts", get(api::list_receipts))
         .route("/v1/receipt/:cid", get(api::get_receipt))
         .route("/v1/resolve", post(api::resolve))
         .route("/v1/execute", post(api::execute_runtime))
