@@ -278,6 +278,18 @@ pub async fn list_receipts(
     (StatusCode::OK, Json(json!(*store)))
 }
 
+pub async fn audit_report(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let store = state.receipt_chain.read().unwrap();
+    let chain: BTreeMap<String, Value> = store
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let report = crate::audit::generate_report(&chain);
+    (StatusCode::OK, Json(json!(report)))
+}
+
 pub async fn get_transition(
     State(state): State<AppState>,
     Path(cid): Path<String>,

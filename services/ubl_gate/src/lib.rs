@@ -1,4 +1,5 @@
 pub mod api;
+pub mod audit;
 
 use axum::http::HeaderValue;
 use axum::{
@@ -201,6 +202,7 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/certify", post(api::certify_cid))
         .route("/v1/receipts", get(api::list_receipts))
         .route("/v1/receipt/:cid", get(api::get_receipt))
+        .route("/v1/audit", get(api::audit_report))
         .route("/v1/resolve", post(api::resolve))
         .route("/v1/execute", post(api::execute_runtime))
         .route("/v1/execute/rb", post(api::execute_rb))
