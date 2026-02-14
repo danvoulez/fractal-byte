@@ -3,10 +3,10 @@
 //! Wires rb_vm::Vm with in-memory CAS and Ed25519 signer,
 //! exposing a simple `execute_rb()` function.
 
-use rb_vm::{Vm, VmConfig, ExecError, Cid};
-use rb_vm::exec::{CasProvider, SignProvider};
 use crate::nrf_canon::Nrf1Canon;
+use rb_vm::exec::{CasProvider, SignProvider};
 use rb_vm::tlv;
+use rb_vm::{Cid, ExecError, Vm, VmConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -17,14 +17,18 @@ struct MemCas {
 }
 
 impl MemCas {
-    fn new() -> Self { Self { store: HashMap::new() } }
+    fn new() -> Self {
+        Self {
+            store: HashMap::new(),
+        }
+    }
 }
 
 impl CasProvider for MemCas {
     fn put(&mut self, bytes: &[u8]) -> Cid {
         let hash = blake3::hash(bytes);
         let hex = hex::encode(hash.as_bytes());
-        let cid = Cid(format!("b3:{}", hex));
+        let cid = Cid(format!("b3:{hex}"));
         self.store.insert(cid.0.clone(), bytes.to_vec());
         cid
     }
@@ -41,7 +45,9 @@ struct FixedSigner {
 
 impl FixedSigner {
     fn from_seed(seed: [u8; 32]) -> Self {
-        Self { key: ed25519_dalek::SigningKey::from_bytes(&seed) }
+        Self {
+            key: ed25519_dalek::SigningKey::from_bytes(&seed),
+        }
     }
 }
 
@@ -50,7 +56,9 @@ impl SignProvider for FixedSigner {
         use ed25519_dalek::Signer;
         self.key.sign(payload).to_bytes().to_vec()
     }
-    fn kid(&self) -> String { "did:dev#k1".into() }
+    fn kid(&self) -> String {
+        "did:dev#k1".into()
+    }
 }
 
 // ── Public API ───────────────────────────────────────────────────
@@ -73,7 +81,7 @@ pub struct ExecuteRbRes {
 
 pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::RuntimeError> {
     let code = tlv::decode_stream(&req.chip)
-        .map_err(|e| crate::error::RuntimeError::Engine(format!("TLV decode: {}", e)))?;
+        .map_err(|e| crate::error::RuntimeError::Engine(format!("TLV decode: {e}")))?;
 
     let mut cas = MemCas::new();
     let signer = FixedSigner::from_seed([7u8; 32]);
@@ -81,13 +89,17 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
 
     // (A) Capture raw bytes BEFORE normalization (layer -1)
     let raw_bytes = serde_json::to_vec(&req.inputs)
-        .map_err(|e| crate::error::RuntimeError::Engine(format!("serialize inputs: {}", e)))?;
+        .map_err(|e| crate::error::RuntimeError::Engine(format!("serialize inputs: {e}")))?;
     let ghost = req.ghost.unwrap_or(false);
 
-    let input_cids: Vec<Cid> = req.inputs.iter().map(|v| {
-        let bytes = serde_json::to_vec(v).unwrap_or_default();
-        cas.put(&bytes)
-    }).collect();
+    let input_cids: Vec<Cid> = req
+        .inputs
+        .iter()
+        .map(|v| {
+            let bytes = serde_json::to_vec(v).unwrap_or_default();
+            cas.put(&bytes)
+        })
+        .collect();
 
     // CID of the chip bytecode itself (content-addressed)
     let bytecode_cid = crate::cid::cid_b3(&req.chip);
@@ -108,7 +120,7 @@ pub fn execute_rb(req: &ExecuteRbReq) -> Result<ExecuteRbRes, crate::error::Runt
     // (B) Capture rho bytes AFTER normalization (layer 0)
     // The canonical form of the inputs is the rho layer
     let rho_val = serde_json::to_value(&req.inputs)
-        .map_err(|e| crate::error::RuntimeError::Engine(format!("rho serialize: {}", e)))?;
+        .map_err(|e| crate::error::RuntimeError::Engine(format!("rho serialize: {e}")))?;
     let rho_bytes = crate::canon::canonical_bytes(&rho_val)?;
 
     // (C) Build Transition Receipt (RB→rho)

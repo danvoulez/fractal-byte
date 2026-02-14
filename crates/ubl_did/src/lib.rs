@@ -1,9 +1,11 @@
-
 use serde_json::json;
 use ubl_receipt::ISSUER_DID;
 
 pub fn runtime_did_document() -> serde_json::Value {
-    let multibase = format!("z{}", bs58::encode(&ubl_receipt::VERIFYING_KEY.to_bytes()).into_string());
+    let multibase = format!(
+        "z{}",
+        bs58::encode(&ubl_receipt::VERIFYING_KEY.to_bytes()).into_string()
+    );
     json!({
         "id": ISSUER_DID.as_str(),
         "verificationMethod": [
@@ -22,7 +24,7 @@ pub fn runtime_did_document() -> serde_json::Value {
 
 pub fn resolve_did_or_cid(id: &str, base_url: &str) -> serde_json::Value {
     if let Some(cid) = id.strip_prefix("did:cid:") {
-        let url = format!("{}/cid/{}", base_url, cid);
+        let url = format!("{base_url}/cid/{cid}");
         json!({
             "id": id,
             "alsoKnownAs": [url],

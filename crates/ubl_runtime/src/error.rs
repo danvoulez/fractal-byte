@@ -5,7 +5,10 @@ pub enum RuntimeError {
     #[error("validation: {0}")]
     Validation(String),
     #[error("binding: missing inputs: {missing:?}, available vars: {available:?}")]
-    Binding { missing: Vec<String>, available: Vec<String> },
+    Binding {
+        missing: Vec<String>,
+        available: Vec<String>,
+    },
     #[error("policy deny: {0}")]
     PolicyDeny(String),
     #[error("engine: {0}")]

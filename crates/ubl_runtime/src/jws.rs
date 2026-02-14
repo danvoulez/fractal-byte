@@ -103,7 +103,10 @@ mod tests {
         let jws = sign_detached(payload, &key, "did:dev#k1");
 
         let vk = key.verifying_key();
-        assert!(!verify_detached(&jws, b"tampered", &vk), "tampered payload must fail");
+        assert!(
+            !verify_detached(&jws, b"tampered", &vk),
+            "tampered payload must fail"
+        );
     }
 
     #[test]
@@ -114,7 +117,10 @@ mod tests {
 
         let wrong_key = SigningKey::from_bytes(&[99u8; 32]);
         let wrong_vk = wrong_key.verifying_key();
-        assert!(!verify_detached(&jws, payload, &wrong_vk), "wrong key must fail");
+        assert!(
+            !verify_detached(&jws, payload, &wrong_vk),
+            "wrong key must fail"
+        );
     }
 
     #[test]

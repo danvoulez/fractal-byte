@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
-use serde_json::Value;
 use crate::error::{Result, RuntimeError};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// D8: deterministic input binding from vars -> grammar inputs.
 pub fn bind_vars_to_inputs(
@@ -11,13 +11,18 @@ pub fn bind_vars_to_inputs(
     let mut bound = BTreeMap::new();
     let mut missing = Vec::new();
     for k in grammar_inputs.keys() {
-        if let Some(v) = vars.get(k) { bound.insert(k.clone(), v.clone()); }
-        else { missing.push(k.clone()); }
+        if let Some(v) = vars.get(k) {
+            bound.insert(k.clone(), v.clone());
+        } else {
+            missing.push(k.clone());
+        }
     }
-    if missing.is_empty() { return Ok(bound); }
+    if missing.is_empty() {
+        return Ok(bound);
+    }
 
     // 2) fallback 1<->1
-    if grammar_inputs.len()==1 && vars.len()==1 {
+    if grammar_inputs.len() == 1 && vars.len() == 1 {
         let (gin, _) = grammar_inputs.iter().next().unwrap();
         let (_, v) = vars.iter().next().unwrap();
         bound.insert(gin.clone(), v.clone());
@@ -25,7 +30,10 @@ pub fn bind_vars_to_inputs(
     }
 
     // 3) error
-    Err(RuntimeError::Binding{ missing, available: vars.keys().cloned().collect() })
+    Err(RuntimeError::Binding {
+        missing,
+        available: vars.keys().cloned().collect(),
+    })
 }
 
 #[cfg(test)]
@@ -34,7 +42,10 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     fn map(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
-        pairs.iter().map(|(k,v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     #[test]

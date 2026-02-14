@@ -1,5 +1,6 @@
 pub mod api;
 
+use axum::http::HeaderValue;
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -8,11 +9,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use axum::http::HeaderValue;
 use metrics::{counter, histogram};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -54,9 +54,13 @@ impl RateLimiter {
 
     pub fn from_env() -> Self {
         let rpm: u32 = std::env::var("RATE_LIMIT_RPM_DEFAULT")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
         let burst: u32 = std::env::var("RATE_LIMIT_BURST")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(50);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
         Self::new(rpm, burst)
     }
 
@@ -67,10 +71,12 @@ impl RateLimiter {
         let now = Instant::now();
         let refill_rate = self.rpm as f64 / 60.0; // tokens per second
 
-        let bucket = buckets.entry(client_id.to_string()).or_insert_with(|| Bucket {
-            tokens: self.burst as f64,
-            last_refill: now,
-        });
+        let bucket = buckets
+            .entry(client_id.to_string())
+            .or_insert_with(|| Bucket {
+                tokens: self.burst as f64,
+                last_refill: now,
+            });
 
         // Refill tokens based on elapsed time
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
@@ -116,12 +122,17 @@ impl TokenStore {
     /// Create a store pre-loaded with the dev token.
     pub fn with_dev_token() -> Self {
         let mut m = HashMap::new();
-        m.insert(DEV_TOKEN.to_string(), ClientInfo {
-            client_id: "dev-client".into(),
-            tenant_id: "default".into(),
-            allowed_kids: vec![], // empty = unrestricted
-        });
-        Self { tokens: Arc::new(RwLock::new(m)) }
+        m.insert(
+            DEV_TOKEN.to_string(),
+            ClientInfo {
+                client_id: "dev-client".into(),
+                tenant_id: "default".into(),
+                allowed_kids: vec![], // empty = unrestricted
+            },
+        );
+        Self {
+            tokens: Arc::new(RwLock::new(m)),
+        }
     }
 
     /// Register a new token → client mapping.
@@ -151,7 +162,9 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        let auth_disabled = std::env::var("UBL_AUTH_DISABLED").map(|v| v == "1").unwrap_or(true);
+        let auth_disabled = std::env::var("UBL_AUTH_DISABLED")
+            .map(|v| v == "1")
+            .unwrap_or(true);
         Self {
             transition_receipts: Default::default(),
             receipt_chain: Default::default(),
@@ -174,10 +187,7 @@ pub fn app() -> Router {
 /// Safe to call multiple times (subsequent calls return None).
 pub fn init_metrics() -> Option<metrics_exporter_prometheus::PrometheusHandle> {
     let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    match builder.install_recorder() {
-        Ok(handle) => Some(handle),
-        Err(_) => None, // recorder already installed (e.g. in tests)
-    }
+    builder.install_recorder().ok()
 }
 
 pub fn app_with_state(state: AppState) -> Router {
@@ -196,34 +206,36 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/v1/transition/:cid", get(api::get_transition))
         .route("/cid/:cid", get(api::get_cid_dispatch))
         .route("/.well-known/did.json", get(api::well_known_did_json))
-        .layer(CorsLayer::new()
-            .allow_origin([
-                "https://api.ubl.agency".parse::<HeaderValue>().unwrap(),
-                "https://ui.ubl.agency".parse::<HeaderValue>().unwrap(),
-                "https://tunnel.ubl.agency".parse::<HeaderValue>().unwrap(),
-                "https://ubl.agency".parse::<HeaderValue>().unwrap(),
-                "http://localhost:3000".parse::<HeaderValue>().unwrap(),
-                "http://localhost:3001".parse::<HeaderValue>().unwrap(),
-            ])
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-                axum::http::Method::OPTIONS,
-            ])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-                "x-ubl-compat".parse().unwrap(),
-                "x-request-id".parse().unwrap(),
-            ])
-            .expose_headers([
-                "x-ratelimit-limit".parse().unwrap(),
-                "x-ratelimit-remaining".parse().unwrap(),
-                "retry-after".parse().unwrap(),
-            ])
-            .max_age(Duration::from_secs(3600)))
+        .layer(
+            CorsLayer::new()
+                .allow_origin([
+                    "https://api.ubl.agency".parse::<HeaderValue>().unwrap(),
+                    "https://ui.ubl.agency".parse::<HeaderValue>().unwrap(),
+                    "https://tunnel.ubl.agency".parse::<HeaderValue>().unwrap(),
+                    "https://ubl.agency".parse::<HeaderValue>().unwrap(),
+                    "http://localhost:3000".parse::<HeaderValue>().unwrap(),
+                    "http://localhost:3001".parse::<HeaderValue>().unwrap(),
+                ])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                    "x-ubl-compat".parse().unwrap(),
+                    "x-request-id".parse().unwrap(),
+                ])
+                .expose_headers([
+                    "x-ratelimit-limit".parse().unwrap(),
+                    "x-ratelimit-remaining".parse().unwrap(),
+                    "retry-after".parse().unwrap(),
+                ])
+                .max_age(Duration::from_secs(3600)),
+        )
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
         .layer(middleware::from_fn(require_json_content_type))
@@ -242,20 +254,20 @@ pub fn app_with_state(state: AppState) -> Router {
 /// Middleware: reject POST/PUT requests without application/json content-type.
 async fn require_json_content_type(req: Request, next: Next) -> Response {
     let dominated_by_json = match req.method().as_str() {
-        "POST" | "PUT" | "PATCH" => {
-            req.headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .map(|ct| ct.starts_with("application/json"))
-                .unwrap_or(false)
-        }
+        "POST" | "PUT" | "PATCH" => req
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.starts_with("application/json"))
+            .unwrap_or(false),
         _ => true, // GET, DELETE, etc. don't need content-type
     };
     if !dominated_by_json {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Json(json!({"error": "content-type must be application/json"})),
-        ).into_response();
+        )
+            .into_response();
     }
     next.run(req).await
 }
@@ -275,7 +287,8 @@ async fn require_bearer_auth(state: AppState, mut req: Request, next: Next) -> R
         return next.run(req).await;
     }
     // Extract Bearer token
-    let token = req.headers()
+    let token = req
+        .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
@@ -290,13 +303,15 @@ async fn require_bearer_auth(state: AppState, mut req: Request, next: Next) -> R
                 None => (
                     StatusCode::UNAUTHORIZED,
                     Json(json!({"error": "invalid bearer token"})),
-                ).into_response(),
+                )
+                    .into_response(),
             }
         }
         None => (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "missing Authorization: Bearer <token> header"})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -309,7 +324,8 @@ async fn rate_limit_middleware(state: AppState, req: Request, next: Next) -> Res
     }
 
     // Get client_id from extensions (injected by auth middleware), fallback to "anonymous"
-    let client_id = req.extensions()
+    let client_id = req
+        .extensions()
         .get::<ClientInfo>()
         .map(|ci| ci.client_id.clone())
         .unwrap_or_else(|| "anonymous".to_string());
@@ -356,7 +372,8 @@ async fn metrics_middleware(req: Request, next: Next) -> Response {
     let elapsed = start.elapsed().as_secs_f64();
 
     counter!("ubl_gate_requests_total", "route" => route.clone(), "status" => status.clone(), "method" => method.clone()).increment(1);
-    histogram!("ubl_gate_request_duration_seconds", "route" => route, "method" => method).record(elapsed);
+    histogram!("ubl_gate_request_duration_seconds", "route" => route, "method" => method)
+        .record(elapsed);
 
     if resp.status().is_server_error() {
         counter!("ubl_gate_errors_total", "status" => status).increment(1);
@@ -374,9 +391,13 @@ async fn metrics_endpoint(State(state): axum::extract::State<AppState>) -> impl 
         let body = handle.render();
         (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
             body,
-        ).into_response()
+        )
+            .into_response()
     } else {
         (StatusCode::OK, "# no metrics recorder installed\n").into_response()
     }

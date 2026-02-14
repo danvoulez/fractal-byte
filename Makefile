@@ -1,5 +1,5 @@
 
-.PHONY: build test run race conformance validate docs docker e2e sdk-ts sdk-py auth-smoke compat certs-dev
+.PHONY: build test run race conformance validate docs docker e2e sdk-ts sdk-py auth-smoke compat certs-dev release pre-release changelog lint fmt
 
 build:
 	cargo build --workspace
@@ -58,6 +58,35 @@ sdk-py:
 certs-dev:
 	@echo "── Generating dev mTLS certificates ──"
 	bash scripts/certs-dev.sh certs/dev
+
+# ── Release pipeline ─────────────────────────────────────────────
+
+v ?= patch
+release:
+	@if [ -z "$(version)" ]; then echo "Usage: make release version=0.2.0"; exit 1; fi
+	@echo "═══ Releasing v$(version) ═══"
+	$(MAKE) pre-release
+	@echo "── Tagging v$(version) ──"
+	git tag -a "v$(version)" -m "Release v$(version)"
+	git push origin main --tags
+	@echo "✓ Tag v$(version) pushed — GitHub Actions will build + release"
+
+pre-release: fmt-fix lint test conformance compat
+	@echo "✓ Pre-release gate passed"
+
+changelog:
+	@echo "── Generating changelog ──"
+	git-cliff --output CHANGELOG.md
+	@echo "  ✓ CHANGELOG.md updated"
+
+lint:
+	cargo clippy --workspace --all-targets -- -D warnings
+
+fmt:
+	cargo fmt --all --check
+
+fmt-fix:
+	cargo fmt --all
 
 compat:
 	@echo "── Compat check: OpenAPI spec version ──"

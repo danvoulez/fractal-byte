@@ -1,5 +1,5 @@
-use crate::types::Cid;
 use crate::exec::CasProvider;
+use crate::types::Cid;
 use blake3::Hasher;
 use std::fs;
 use std::io::Write;
@@ -14,7 +14,7 @@ impl FsCas {
     pub fn new<P: AsRef<Path>>(root: P) -> Self {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).ok();
-        Self{ root }
+        Self { root }
     }
 
     fn path_for(&self, cid: &Cid) -> PathBuf {
@@ -31,9 +31,11 @@ impl CasProvider for FsCas {
         hasher.update(bytes);
         let digest = hasher.finalize();
         let hex = hex::encode(digest.as_bytes());
-        let cid = Cid(format!("b3:{}", hex));
+        let cid = Cid(format!("b3:{hex}"));
         let path = self.path_for(&cid);
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent).ok(); }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
         if !path.exists() {
             let mut f = fs::File::create(&path).expect("cas create");
             f.write_all(bytes).expect("cas write");

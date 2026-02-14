@@ -1,4 +1,4 @@
-use serde_json::{Value, Map};
+use serde_json::{Map, Value};
 
 /// Trait para prover a canon NRF/JSON real (plugável).
 pub trait CanonProvider {
@@ -15,7 +15,7 @@ impl CanonProvider for NaiveCanon {
                 Value::Object(m) => {
                     // ordena por chave e aplica recursão
                     let mut pairs: Vec<(String, Value)> = m.into_iter().collect();
-                    pairs.sort_by(|a,b| a.0.cmp(&b.0));
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
                     let mut out = Map::new();
                     for (k, val) in pairs {
                         out.insert(k, sort(val));

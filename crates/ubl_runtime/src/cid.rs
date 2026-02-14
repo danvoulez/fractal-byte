@@ -11,10 +11,10 @@ pub fn cid_b3(bytes: &[u8]) -> String {
 mod hex {
     pub fn encode(input: &[u8]) -> String {
         const LUT: &[u8; 16] = b"0123456789abcdef";
-        let mut out = String::with_capacity(input.len()*2);
+        let mut out = String::with_capacity(input.len() * 2);
         for &b in input {
-            out.push(LUT[(b>>4) as usize] as char);
-            out.push(LUT[(b&0x0f) as usize] as char);
+            out.push(LUT[(b >> 4) as usize] as char);
+            out.push(LUT[(b & 0x0f) as usize] as char);
         }
         out
     }
@@ -27,6 +27,6 @@ mod tests {
     fn cid_len() {
         let c = cid_b3(b"hello");
         assert!(c.starts_with("b3:"));
-        assert_eq!(c.len(), 2+1+64);
+        assert_eq!(c.len(), 2 + 1 + 64);
     }
 }

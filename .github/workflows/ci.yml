@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Lint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+
+  test:
+    name: Test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  conformance:
+    name: Conformance
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Receipt schema validation
+        run: cargo test -p ubl_runtime -- receipt --nocapture
+
+      - name: RB-VM law tests
+        run: cargo test -p rb_vm -- --nocapture
+
+      - name: NRF canonicalization
+        run: cargo test -p ubl_ai_nrf1 -- --nocapture
+
+      - name: Gate hardened (auth, rate-limit, tenant, replay, edge)
+        run: cargo test -p ubl_gate --test hardened -- --nocapture
+
+      - name: Race condition test
+        run: cargo test -p ubl_gate --test race_card -- --nocapture
+
+  compat:
+    name: Compat Suite
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OpenAPI spec version
+        run: grep -q 'version:' docs/OPENAPI.md
+
+      - name: Receipt schema present
+        run: test -f schemas/receipt.schema.json
+
+      - name: Transition schema present
+        run: test -f schemas/transition.schema.json
+
+      - name: Receipt-first invariants
+        run: |
+          grep -q 'Receipt' docs/OPENAPI.md
+          grep -q 'Logline' docs/OPENAPI.md
+          grep -q 'bearerAuth' docs/OPENAPI.md
+          grep -q '409' docs/OPENAPI.md
+          echo "✓ compat 5/5"

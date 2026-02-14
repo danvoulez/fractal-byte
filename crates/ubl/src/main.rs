@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 const LEDGER_DIR: &str = "ledger";
 const ATTEST_DIR: &str = "attestations";
 const EVENTS_DIR: &str = "events";
+#[allow(dead_code)]
 const SCHEMAS_DIR: &str = "schemas";
 
 fn repo_root() -> PathBuf {
@@ -28,7 +29,9 @@ fn cidv1_raw_sha256_base32(bytes: &[u8]) -> String {
 }
 
 fn ensure_dir(p: &Path) -> io::Result<()> {
-    if !p.exists() { fs::create_dir_all(p)?; }
+    if !p.exists() {
+        fs::create_dir_all(p)?;
+    }
     Ok(())
 }
 
@@ -48,7 +51,7 @@ fn cmd_put(path: &Path) -> io::Result<()> {
     let dst = shard.join(&cid);
     fs::write(&dst, &buf)?;
 
-    println!("{}", cid);
+    println!("{cid}");
     Ok(())
 }
 
@@ -67,11 +70,13 @@ fn cmd_get(cid: &str, out: Option<&Path>) -> io::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn load_schema(name: &str) -> io::Result<serde_json::Value> {
     let root = repo_root();
     let path = root.join(SCHEMAS_DIR).join(name);
     let s = fs::read_to_string(path)?;
-    let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&s).map_err(|e| io::Error::other(e.to_string()))?;
     Ok(v)
 }
 
@@ -79,7 +84,10 @@ fn load_schema(name: &str) -> io::Result<serde_json::Value> {
 fn validate_required(obj: &serde_json::Value, required: &[&str]) -> io::Result<()> {
     for k in required {
         if obj.get(*k).is_none() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("missing field: {}", k)));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("missing field: {k}"),
+            ));
         }
     }
     Ok(())
@@ -98,12 +106,22 @@ fn cmd_attest(target_cid: &str, claim: &str, signer: &str) -> io::Result<()> {
     });
 
     // validate minimal
-    validate_required(&att, &["type","target_cid","claim","signer","created_at","signature"])?;
+    validate_required(
+        &att,
+        &[
+            "type",
+            "target_cid",
+            "claim",
+            "signer",
+            "created_at",
+            "signature",
+        ],
+    )?;
 
     let root = repo_root();
     let dir = root.join(ATTEST_DIR);
     ensure_dir(&dir)?;
-    let fname = format!("attest-{}-{}.json", claim, now.replace(':'  ,"_"));
+    let fname = format!("attest-{}-{}.json", claim, now.replace(':', "_"));
     fs::write(dir.join(fname), serde_json::to_string_pretty(&att).unwrap())?;
     println!("ok");
     Ok(())
@@ -112,7 +130,9 @@ fn cmd_attest(target_cid: &str, claim: &str, signer: &str) -> io::Result<()> {
 fn cmd_event(kind: &str, subject: &str, title: Option<&str>) -> io::Result<()> {
     let now = Utc::now().to_rfc3339();
     let mut meta = serde_json::Map::new();
-    if let Some(t) = title { meta.insert("title".into(), serde_json::Value::String(t.into())); }
+    if let Some(t) = title {
+        meta.insert("title".into(), serde_json::Value::String(t.into()));
+    }
     let ev = json!({
         "type": "event",
         "kind": kind,
@@ -122,23 +142,38 @@ fn cmd_event(kind: &str, subject: &str, title: Option<&str>) -> io::Result<()> {
         "created_at": now,
         "signature": "base64:TODO"
     });
-    validate_required(&ev, &["type","kind","subjects","author","created_at","signature"])?;
+    validate_required(
+        &ev,
+        &[
+            "type",
+            "kind",
+            "subjects",
+            "author",
+            "created_at",
+            "signature",
+        ],
+    )?;
     let root = repo_root();
     let dir = root.join(EVENTS_DIR);
     ensure_dir(&dir)?;
-    let fname = format!("event-{}-{}.json", kind, now.replace(':'  ,"_"));
+    let fname = format!("event-{}-{}.json", kind, now.replace(':', "_"));
     fs::write(dir.join(fname), serde_json::to_string_pretty(&ev).unwrap())?;
     println!("ok");
     Ok(())
 }
 
 fn parse_created_at(v: &serde_json::Value) -> String {
-    v.get("created_at").and_then(|x| x.as_str()).unwrap_or("1970-01-01T00:00:00Z").to_string()
+    v.get("created_at")
+        .and_then(|x| x.as_str())
+        .unwrap_or("1970-01-01T00:00:00Z")
+        .to_string()
 }
 
 fn load_jsons(dir: &Path) -> io::Result<Vec<serde_json::Value>> {
     let mut out = Vec::new();
-    if !dir.exists() { return Ok(out); }
+    if !dir.exists() {
+        return Ok(out);
+    }
     for ent in fs::read_dir(dir)? {
         let ent = ent?;
         let path = ent.path();
@@ -162,23 +197,29 @@ fn cmd_story(target: &str) -> io::Result<()> {
     let events = load_jsons(&root.join(EVENTS_DIR))?
         .into_iter()
         .filter(|v| {
-            v.get("subjects").and_then(|x| x.as_array())
-             .map(|arr| arr.iter().any(|s| s.as_str() == Some(target))).unwrap_or(false)
+            v.get("subjects")
+                .and_then(|x| x.as_array())
+                .map(|arr| arr.iter().any(|s| s.as_str() == Some(target)))
+                .unwrap_or(false)
         })
         .collect::<Vec<_>>();
     let mut events_sorted = events.clone();
     let mut atts_sorted = atts.clone();
-    events_sorted.sort_by_key(|v| parse_created_at(v));
-    atts_sorted.sort_by_key(|v| parse_created_at(v));
+    events_sorted.sort_by_key(parse_created_at);
+    atts_sorted.sort_by_key(parse_created_at);
 
-    println!("# Story for {}\n", target);
+    println!("# Story for {target}\n");
     if !events_sorted.is_empty() {
         println!("## Events");
         for ev in &events_sorted {
             let created = parse_created_at(ev);
             let kind = ev.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
-            let title = ev.get("metadata").and_then(|m| m.get("title")).and_then(|v| v.as_str()).unwrap_or("");
-            println!("- [{}] {} {}", created, kind, title);
+            let title = ev
+                .get("metadata")
+                .and_then(|m| m.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            println!("- [{created}] {kind} {title}");
         }
         println!();
     }
@@ -188,7 +229,7 @@ fn cmd_story(target: &str) -> io::Result<()> {
             let created = parse_created_at(at);
             let claim = at.get("claim").and_then(|v| v.as_str()).unwrap_or("?");
             let signer = at.get("signer").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("- [{}] {} (by {})", created, claim, signer);
+            println!("- [{created}] {claim} (by {signer})");
         }
         println!();
     }
@@ -205,7 +246,10 @@ fn cmd_verify(arg: &str) -> io::Result<()> {
     }
     // Legacy CID verification
     if !arg.starts_with("cidv1-raw-sha2-256:") && !arg.starts_with("b3:") {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid CID form (expected cidv1-raw-sha2-256:... or b3:...)"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid CID form (expected cidv1-raw-sha2-256:... or b3:...)",
+        ));
     }
     let root = repo_root();
     let prefix = &arg[arg.len().saturating_sub(2)..];
@@ -220,20 +264,23 @@ fn cmd_verify(arg: &str) -> io::Result<()> {
 fn cmd_verify_receipt(path: &Path) -> io::Result<()> {
     let content = fs::read_to_string(path)?;
     let rc: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {}", e)))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid JSON: {e}")))?;
 
     // Check required fields
     let t = rc.get("t").and_then(|v| v.as_str()).unwrap_or("");
-    let body_cid = rc.get("body_cid").and_then(|v| v.as_str())
+    let body_cid = rc
+        .get("body_cid")
+        .and_then(|v| v.as_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing body_cid"))?;
-    let body = rc.get("body")
+    let body = rc
+        .get("body")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing body"))?;
-    let _proof = rc.get("proof")
+    let _proof = rc
+        .get("proof")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing proof"))?;
 
     // Verify body_cid matches canonical body
-    let body_str = serde_json::to_string(body)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let body_str = serde_json::to_string(body).map_err(|e| io::Error::other(e.to_string()))?;
     let mut hasher = Sha256::new();
     hasher.update(body_str.as_bytes());
     // For b3: CIDs we can't verify with SHA256, just check format
@@ -245,9 +292,15 @@ fn cmd_verify_receipt(path: &Path) -> io::Result<()> {
 
     // If transition receipt, print the from→to
     if t == "ubl/transition" {
-        let from = body.pointer("/preimage_raw_cid").and_then(|v| v.as_str()).unwrap_or("?");
-        let to = body.pointer("/rho_cid").and_then(|v| v.as_str()).unwrap_or("?");
-        println!("transition: {} -> {}", from, to);
+        let from = body
+            .pointer("/preimage_raw_cid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let to = body
+            .pointer("/rho_cid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        println!("transition: {from} -> {to}");
     }
 
     // Check parents
@@ -255,8 +308,8 @@ fn cmd_verify_receipt(path: &Path) -> io::Result<()> {
         println!("parents: {} receipt(s) in chain", parents.len());
     }
 
-    println!("type: {}", t);
-    println!("body_cid: {}", body_cid);
+    println!("type: {t}");
+    println!("body_cid: {body_cid}");
     println!("OK");
     Ok(())
 }
@@ -304,7 +357,7 @@ fn main() -> io::Result<()> {
             let cid = args.next().expect("cid");
             cmd_verify(&cid)?
         }
-        _ => help()
+        _ => help(),
     }
     Ok(())
 }

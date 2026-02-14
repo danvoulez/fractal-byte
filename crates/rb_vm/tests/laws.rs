@@ -12,10 +12,9 @@
 //! Law 10: Mandatory narrative on critical denies
 
 use rb_vm::{
-    Vm, VmConfig, VmOutcome, ExecError, Cid,
-    exec::{CasProvider, SignProvider},
     canon::NaiveCanon,
-    tlv,
+    exec::{CasProvider, SignProvider},
+    tlv, Cid, ExecError, Vm, VmConfig, VmOutcome,
 };
 use std::collections::HashMap;
 
@@ -26,14 +25,18 @@ struct MemCas {
 }
 
 impl MemCas {
-    fn new() -> Self { Self { store: HashMap::new() } }
+    fn new() -> Self {
+        Self {
+            store: HashMap::new(),
+        }
+    }
 }
 
 impl CasProvider for MemCas {
     fn put(&mut self, bytes: &[u8]) -> Cid {
         let hash = blake3::hash(bytes);
         let hex = hex::encode(hash.as_bytes());
-        let cid = Cid(format!("b3:{}", hex));
+        let cid = Cid(format!("b3:{hex}"));
         self.store.insert(cid.0.clone(), bytes.to_vec());
         cid
     }
@@ -50,7 +53,9 @@ struct FixedSigner {
 
 impl FixedSigner {
     fn new() -> Self {
-        Self { key: ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]) }
+        Self {
+            key: ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+        }
     }
 }
 
@@ -59,7 +64,9 @@ impl SignProvider for FixedSigner {
         use ed25519_dalek::Signer;
         self.key.sign(payload).to_bytes().to_vec()
     }
-    fn kid(&self) -> String { "did:dev#k1".into() }
+    fn kid(&self) -> String {
+        "did:dev#k1".into()
+    }
 }
 
 // ── TLV builder helpers ──────────────────────────────────────────
@@ -72,25 +79,65 @@ fn tlv_instr(op: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-fn tlv_const_i64(v: i64) -> Vec<u8> { tlv_instr(0x01, &v.to_be_bytes()) }
-fn tlv_const_bytes(b: &[u8]) -> Vec<u8> { tlv_instr(0x02, b) }
-fn tlv_push_input(idx: u16) -> Vec<u8> { tlv_instr(0x12, &idx.to_be_bytes()) }
-fn tlv_json_normalize() -> Vec<u8> { tlv_instr(0x03, &[]) }
-fn tlv_json_validate() -> Vec<u8> { tlv_instr(0x04, &[]) }
-fn tlv_json_get_key(key: &str) -> Vec<u8> { tlv_instr(0x13, key.as_bytes()) }
-fn tlv_add_i64() -> Vec<u8> { tlv_instr(0x05, &[]) }
-fn tlv_sub_i64() -> Vec<u8> { tlv_instr(0x06, &[]) }
-fn tlv_mul_i64() -> Vec<u8> { tlv_instr(0x07, &[]) }
-fn tlv_cmp_i64(op: u8) -> Vec<u8> { tlv_instr(0x08, &[op]) }
-fn tlv_assert_true() -> Vec<u8> { tlv_instr(0x09, &[]) }
-fn tlv_hash_blake3() -> Vec<u8> { tlv_instr(0x0A, &[]) }
-fn tlv_cas_put() -> Vec<u8> { tlv_instr(0x0B, &[]) }
-fn tlv_cas_get() -> Vec<u8> { tlv_instr(0x0C, &[]) }
-fn tlv_set_rc_body() -> Vec<u8> { tlv_instr(0x0D, &[]) }
-fn tlv_attach_proof() -> Vec<u8> { tlv_instr(0x0E, &[]) }
-fn tlv_sign_default() -> Vec<u8> { tlv_instr(0x0F, &[]) }
-fn tlv_emit_rc() -> Vec<u8> { tlv_instr(0x10, &[]) }
-fn tlv_drop() -> Vec<u8> { tlv_instr(0x11, &[]) }
+fn tlv_const_i64(v: i64) -> Vec<u8> {
+    tlv_instr(0x01, &v.to_be_bytes())
+}
+fn tlv_const_bytes(b: &[u8]) -> Vec<u8> {
+    tlv_instr(0x02, b)
+}
+fn tlv_push_input(idx: u16) -> Vec<u8> {
+    tlv_instr(0x12, &idx.to_be_bytes())
+}
+fn tlv_json_normalize() -> Vec<u8> {
+    tlv_instr(0x03, &[])
+}
+fn tlv_json_validate() -> Vec<u8> {
+    tlv_instr(0x04, &[])
+}
+fn tlv_json_get_key(key: &str) -> Vec<u8> {
+    tlv_instr(0x13, key.as_bytes())
+}
+fn tlv_add_i64() -> Vec<u8> {
+    tlv_instr(0x05, &[])
+}
+#[allow(dead_code)]
+fn tlv_sub_i64() -> Vec<u8> {
+    tlv_instr(0x06, &[])
+}
+#[allow(dead_code)]
+fn tlv_mul_i64() -> Vec<u8> {
+    tlv_instr(0x07, &[])
+}
+fn tlv_cmp_i64(op: u8) -> Vec<u8> {
+    tlv_instr(0x08, &[op])
+}
+fn tlv_assert_true() -> Vec<u8> {
+    tlv_instr(0x09, &[])
+}
+fn tlv_hash_blake3() -> Vec<u8> {
+    tlv_instr(0x0A, &[])
+}
+fn tlv_cas_put() -> Vec<u8> {
+    tlv_instr(0x0B, &[])
+}
+fn tlv_cas_get() -> Vec<u8> {
+    tlv_instr(0x0C, &[])
+}
+fn tlv_set_rc_body() -> Vec<u8> {
+    tlv_instr(0x0D, &[])
+}
+fn tlv_attach_proof() -> Vec<u8> {
+    tlv_instr(0x0E, &[])
+}
+fn tlv_sign_default() -> Vec<u8> {
+    tlv_instr(0x0F, &[])
+}
+fn tlv_emit_rc() -> Vec<u8> {
+    tlv_instr(0x10, &[])
+}
+fn tlv_drop() -> Vec<u8> {
+    tlv_instr(0x11, &[])
+}
 
 fn build_chip(instrs: &[Vec<u8>]) -> Vec<u8> {
     instrs.iter().flat_map(|i| i.iter().copied()).collect()
@@ -103,19 +150,31 @@ fn run_chip(chip: &[u8], inputs_json: &[&str]) -> Result<VmOutcome, ExecError> {
     let canon = NaiveCanon;
 
     let input_cids: Vec<Cid> = inputs_json.iter().map(|j| cas.put(j.as_bytes())).collect();
-    let cfg = VmConfig { fuel_limit: 50_000, ghost: false, trace: false };
+    let cfg = VmConfig {
+        fuel_limit: 50_000,
+        ghost: false,
+        trace: false,
+    };
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
     vm.run(&code)
 }
 
-fn run_chip_with_fuel(chip: &[u8], inputs_json: &[&str], fuel: u64) -> Result<VmOutcome, ExecError> {
+fn run_chip_with_fuel(
+    chip: &[u8],
+    inputs_json: &[&str],
+    fuel: u64,
+) -> Result<VmOutcome, ExecError> {
     let code = tlv::decode_stream(chip).expect("decode");
     let mut cas = MemCas::new();
     let signer = FixedSigner::new();
     let canon = NaiveCanon;
 
     let input_cids: Vec<Cid> = inputs_json.iter().map(|j| cas.put(j.as_bytes())).collect();
-    let cfg = VmConfig { fuel_limit: fuel, ghost: false, trace: false };
+    let cfg = VmConfig {
+        fuel_limit: fuel,
+        ghost: false,
+        trace: false,
+    };
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
     vm.run(&code)
 }
@@ -127,7 +186,11 @@ fn run_chip_ghost(chip: &[u8], inputs_json: &[&str]) -> Result<VmOutcome, ExecEr
     let canon = NaiveCanon;
 
     let input_cids: Vec<Cid> = inputs_json.iter().map(|j| cas.put(j.as_bytes())).collect();
-    let cfg = VmConfig { fuel_limit: 50_000, ghost: true, trace: false };
+    let cfg = VmConfig {
+        fuel_limit: 50_000,
+        ghost: true,
+        trace: false,
+    };
     let mut vm = Vm::new(cfg, cas, &signer, canon, input_cids);
     vm.run(&code)
 }
@@ -179,16 +242,25 @@ fn law1_determinism_10x() {
     let first = run_chip(&chip, &[input]).unwrap().rc_cid.unwrap();
     for i in 1..10 {
         let cid = run_chip(&chip, &[input]).unwrap().rc_cid.unwrap();
-        assert_eq!(first, cid, "Law 1: determinism failed at iteration {}", i);
+        assert_eq!(first, cid, "Law 1: determinism failed at iteration {i}");
     }
 }
 
 #[test]
 fn law1_different_input_different_cid() {
     let chip = deny_age_chip();
-    let cid_a = run_chip(&chip, &[r#"{"age":25,"name":"A"}"#]).unwrap().rc_cid.unwrap();
-    let cid_b = run_chip(&chip, &[r#"{"age":30,"name":"B"}"#]).unwrap().rc_cid.unwrap();
-    assert_ne!(cid_a, cid_b, "Law 1: different inputs must produce different CIDs");
+    let cid_a = run_chip(&chip, &[r#"{"age":25,"name":"A"}"#])
+        .unwrap()
+        .rc_cid
+        .unwrap();
+    let cid_b = run_chip(&chip, &[r#"{"age":30,"name":"B"}"#])
+        .unwrap()
+        .rc_cid
+        .unwrap();
+    assert_ne!(
+        cid_a, cid_b,
+        "Law 1: different inputs must produce different CIDs"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -198,13 +270,22 @@ fn law1_different_input_different_cid() {
 #[test]
 fn law2_tlv_decode_rejects_unknown_opcode() {
     let bad = tlv_instr(0xFF, &[]);
-    assert!(tlv::decode_stream(&bad).is_err(), "Law 2: unknown opcode must fail");
+    assert!(
+        tlv::decode_stream(&bad).is_err(),
+        "Law 2: unknown opcode must fail"
+    );
 }
 
 #[test]
 fn law2_tlv_decode_rejects_truncated() {
-    assert!(tlv::decode_stream(&[0x01, 0x00]).is_err(), "Law 2: truncated header");
-    assert!(tlv::decode_stream(&[0x01, 0x00, 0x08, 0x00]).is_err(), "Law 2: truncated payload");
+    assert!(
+        tlv::decode_stream(&[0x01, 0x00]).is_err(),
+        "Law 2: truncated header"
+    );
+    assert!(
+        tlv::decode_stream(&[0x01, 0x00, 0x08, 0x00]).is_err(),
+        "Law 2: truncated payload"
+    );
 }
 
 #[test]
@@ -234,7 +315,10 @@ fn law3_no_io_cas_get_missing_is_deny() {
     ]);
     let input = r#"{"test":true}"#;
     let result = run_chip(&chip2, &[input]);
-    assert!(result.is_ok(), "Law 3: CasGet on valid input CID should succeed");
+    assert!(
+        result.is_ok(),
+        "Law 3: CasGet on valid input CID should succeed"
+    );
 }
 
 #[test]
@@ -248,7 +332,10 @@ fn law3_no_io_no_external_calls() {
         tlv_drop(),
     ]);
     let result = run_chip(&chip, &[]);
-    assert!(result.is_ok(), "Law 3: pure computation must work without IO");
+    assert!(
+        result.is_ok(),
+        "Law 3: pure computation must work without IO"
+    );
     assert_eq!(result.unwrap().fuel_used, 4);
 }
 
@@ -266,7 +353,10 @@ fn law4_fuel_exhaustion() {
     ]);
     // 4 instructions, fuel=3 should fail
     let result = run_chip_with_fuel(&chip, &[], 3);
-    assert!(matches!(result, Err(ExecError::FuelExhausted)), "Law 4: must exhaust at fuel=3");
+    assert!(
+        matches!(result, Err(ExecError::FuelExhausted)),
+        "Law 4: must exhaust at fuel=3"
+    );
 }
 
 #[test]
@@ -279,7 +369,10 @@ fn law4_fuel_exact_boundary() {
     ]);
     // 4 instructions, fuel=4 should succeed
     let result = run_chip_with_fuel(&chip, &[], 4);
-    assert!(result.is_ok(), "Law 4: fuel=4 for 4 instructions must succeed");
+    assert!(
+        result.is_ok(),
+        "Law 4: fuel=4 for 4 instructions must succeed"
+    );
     assert_eq!(result.unwrap().fuel_used, 4);
 }
 
@@ -289,7 +382,10 @@ fn law4_fuel_deterministic_count() {
     let input = r#"{"age":25,"name":"Test"}"#;
     let r1 = run_chip(&chip, &[input]).unwrap();
     let r2 = run_chip(&chip, &[input]).unwrap();
-    assert_eq!(r1.fuel_used, r2.fuel_used, "Law 4: fuel must be deterministic");
+    assert_eq!(
+        r1.fuel_used, r2.fuel_used,
+        "Law 4: fuel must be deterministic"
+    );
     assert_eq!(r1.steps, r2.steps, "Law 4: steps must be deterministic");
 }
 
@@ -305,24 +401,30 @@ fn law5_type_mismatch_add_on_bytes() {
         tlv_add_i64(),
     ]);
     let result = run_chip(&chip, &[]);
-    assert!(matches!(result, Err(ExecError::TypeMismatch(_))), "Law 5: AddI64 on Bytes must fail");
+    assert!(
+        matches!(result, Err(ExecError::TypeMismatch(_))),
+        "Law 5: AddI64 on Bytes must fail"
+    );
 }
 
 #[test]
 fn law5_type_mismatch_assert_on_i64() {
-    let chip = build_chip(&[
-        tlv_const_i64(1),
-        tlv_assert_true(),
-    ]);
+    let chip = build_chip(&[tlv_const_i64(1), tlv_assert_true()]);
     let result = run_chip(&chip, &[]);
-    assert!(matches!(result, Err(ExecError::TypeMismatch(_))), "Law 5: AssertTrue on I64 must fail");
+    assert!(
+        matches!(result, Err(ExecError::TypeMismatch(_))),
+        "Law 5: AssertTrue on I64 must fail"
+    );
 }
 
 #[test]
 fn law5_stack_underflow() {
     let chip = build_chip(&[tlv_drop()]);
     let result = run_chip(&chip, &[]);
-    assert!(matches!(result, Err(ExecError::StackUnderflow(_))), "Law 5: Drop on empty stack must fail");
+    assert!(
+        matches!(result, Err(ExecError::StackUnderflow(_))),
+        "Law 5: Drop on empty stack must fail"
+    );
 }
 
 #[test]
@@ -332,10 +434,17 @@ fn law5_invalid_payload_const_i64() {
     let cas = MemCas::new();
     let signer = FixedSigner::new();
     let canon = NaiveCanon;
-    let cfg = VmConfig { fuel_limit: 50_000, ghost: false, trace: false };
+    let cfg = VmConfig {
+        fuel_limit: 50_000,
+        ghost: false,
+        trace: false,
+    };
     let mut vm = Vm::new(cfg, cas, &signer, canon, vec![]);
     let result = vm.run(&code);
-    assert!(matches!(result, Err(ExecError::InvalidPayload(_))), "Law 5: bad ConstI64 payload");
+    assert!(
+        matches!(result, Err(ExecError::InvalidPayload(_))),
+        "Law 5: bad ConstI64 payload"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -347,8 +456,14 @@ fn law6_ghost_mode_produces_rc() {
     let chip = deny_age_chip();
     let input = r#"{"age":25,"name":"Ghost"}"#;
     let result = run_chip_ghost(&chip, &[input]);
-    assert!(result.is_ok(), "Law 6: ghost mode must still produce outcome");
-    assert!(result.unwrap().rc_cid.is_some(), "Law 6: ghost mode must emit RC");
+    assert!(
+        result.is_ok(),
+        "Law 6: ghost mode must still produce outcome"
+    );
+    assert!(
+        result.unwrap().rc_cid.is_some(),
+        "Law 6: ghost mode must emit RC"
+    );
 }
 
 #[test]
@@ -384,7 +499,10 @@ fn law7_hash_blake3_deterministic() {
         tlv_drop(),
     ]);
     // Just verify it runs; determinism is covered by Law 1
-    assert!(run_chip(&chip, &[]).is_ok(), "Law 7: HashBlake3 must succeed");
+    assert!(
+        run_chip(&chip, &[]).is_ok(),
+        "Law 7: HashBlake3 must succeed"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -406,17 +524,20 @@ fn law8_canon_sorts_keys() {
     // Both should normalize to the same thing
     let r_a = run_chip(&chip, &[input_a]);
     let r_b = run_chip(&chip, &[input_b]);
-    assert!(r_a.is_ok() && r_b.is_ok(), "Law 8: both normalizations must succeed");
+    assert!(
+        r_a.is_ok() && r_b.is_ok(),
+        "Law 8: both normalizations must succeed"
+    );
 }
 
 #[test]
 fn law8_canon_rejects_invalid_json() {
-    let chip = build_chip(&[
-        tlv_const_bytes(b"not json {{{"),
-        tlv_json_normalize(),
-    ]);
+    let chip = build_chip(&[tlv_const_bytes(b"not json {{{"), tlv_json_normalize()]);
     let result = run_chip(&chip, &[]);
-    assert!(matches!(result, Err(ExecError::Deny(_))), "Law 8: invalid JSON must deny");
+    assert!(
+        matches!(result, Err(ExecError::Deny(_))),
+        "Law 8: invalid JSON must deny"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -429,7 +550,10 @@ fn law9_sign_produces_rc_with_cid() {
     let input = r#"{"age":25,"name":"Signer"}"#;
     let result = run_chip(&chip, &[input]).unwrap();
     let rc_cid = result.rc_cid.unwrap();
-    assert!(rc_cid.0.starts_with("b3:"), "Law 9: RC CID must be b3: prefixed");
+    assert!(
+        rc_cid.0.starts_with("b3:"),
+        "Law 9: RC CID must be b3: prefixed"
+    );
     assert!(rc_cid.0.len() > 10, "Law 9: RC CID must be substantial");
 }
 
@@ -452,9 +576,12 @@ fn law10_deny_has_reason() {
     match result {
         Err(ExecError::Deny(reason)) => {
             assert!(!reason.is_empty(), "Law 10: deny must have a reason string");
-            assert_eq!(reason, "assert_false", "Law 10: deny reason must be 'assert_false'");
+            assert_eq!(
+                reason, "assert_false",
+                "Law 10: deny reason must be 'assert_false'"
+            );
         }
-        other => panic!("Law 10: expected Deny, got {:?}", other),
+        other => panic!("Law 10: expected Deny, got {other:?}"),
     }
 }
 
@@ -465,7 +592,7 @@ fn law10_deny_age_17_is_deterministic() {
     for _ in 0..5 {
         match run_chip(&chip, &[input]) {
             Err(ExecError::Deny(reason)) => assert_eq!(reason, "assert_false"),
-            other => panic!("Law 10: expected Deny, got {:?}", other),
+            other => panic!("Law 10: expected Deny, got {other:?}"),
         }
     }
 }
@@ -477,9 +604,12 @@ fn law10_deny_missing_key() {
     let result = run_chip(&chip, &[input]);
     match result {
         Err(ExecError::Deny(reason)) => {
-            assert!(reason.contains("json_key"), "Law 10: missing key deny must mention json_key, got: {}", reason);
+            assert!(
+                reason.contains("json_key"),
+                "Law 10: missing key deny must mention json_key, got: {reason}"
+            );
         }
-        other => panic!("Law 10: expected Deny for missing key, got {:?}", other),
+        other => panic!("Law 10: expected Deny for missing key, got {other:?}"),
     }
 }
 

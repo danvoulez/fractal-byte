@@ -1,31 +1,59 @@
-name: Build & Release
+name: Release
 
 on:
   push:
-    branches: [main]
+    tags:
+      - "v*"
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  test:
-    name: Test
+  # ── Gate: full test suite must pass before release ──────────────
+  gate:
+    name: Release Gate
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
 
-  build-and-release:
-    name: Build + GitHub Release
-    needs: test
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Unit + integration tests
+        run: cargo test --workspace
+
+      - name: Conformance (receipts + RB-VM + NRF)
+        run: |
+          cargo test -p ubl_runtime -- receipt --nocapture
+          cargo test -p rb_vm -- --nocapture
+          cargo test -p ubl_ai_nrf1 -- --nocapture
+
+      - name: Gate hardened (auth, rate-limit, tenant, replay, edge)
+        run: cargo test -p ubl_gate --test hardened -- --nocapture
+
+      - name: Race condition
+        run: cargo test -p ubl_gate --test race_card -- --nocapture
+
+  # ── Build release binaries ─────────────────────────────────────
+  build:
+    name: Build macOS arm64
+    needs: gate
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -34,27 +62,71 @@ jobs:
           cargo build --release -p ubl_gate
           cargo build --release -p ubl
 
-      - name: Package binaries
-        id: package
+      - name: Package
         run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
-          TAG="v0.1.0-${SHORT_SHA}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          VERSION="${GITHUB_REF_NAME}"
           mkdir -p dist
           cp target/release/ubl_gate dist/
           cp target/release/ubl dist/
-          echo "${SHORT_SHA}" > dist/VERSION
+          echo "${VERSION}" > dist/VERSION
+          echo "${{ github.sha }}" > dist/COMMIT
           tar czf ubl-darwin-arm64.tar.gz -C dist .
           shasum -a 256 ubl-darwin-arm64.tar.gz > ubl-darwin-arm64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubl-darwin-arm64
+          path: |
+            ubl-darwin-arm64.tar.gz
+            ubl-darwin-arm64.tar.gz.sha256
+
+  # ── Generate changelog + publish GitHub Release ────────────────
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        run: |
+          curl -sL https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          mv git-cliff-*/git-cliff /usr/local/bin/
+
+      - name: Generate changelog for this release
+        id: changelog
+        run: |
+          # Generate changelog for commits since last tag
+          PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1 || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            git-cliff "${PREV_TAG}..${GITHUB_REF_NAME}" --strip header -o RELEASE_NOTES.md
+          else
+            git-cliff --strip header -o RELEASE_NOTES.md
+          fi
+          echo "Generated release notes:"
+          cat RELEASE_NOTES.md
+
+      - name: Generate full changelog
+        run: |
+          git-cliff --output CHANGELOG.md
+          echo "Full changelog updated"
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ubl-darwin-arm64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.package.outputs.tag }}
-          name: "UBL ${{ steps.package.outputs.tag }}"
-          body: "Automated build from commit ${{ github.sha }}"
+          tag_name: ${{ github.ref_name }}
+          name: "UBL ${{ github.ref_name }}"
+          body_path: RELEASE_NOTES.md
           files: |
             ubl-darwin-arm64.tar.gz
             ubl-darwin-arm64.tar.gz.sha256
+            CHANGELOG.md
           make_latest: true

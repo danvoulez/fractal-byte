@@ -4,7 +4,7 @@
 //! sorted keys, NFC strings, reject floats, reject BOM, i64-only numbers.
 
 use rb_vm::canon::CanonProvider;
-use serde_json::{Value, Map};
+use serde_json::{Map, Value};
 use unicode_normalization::UnicodeNormalization;
 
 /// Real NRF-1.1 canon provider for rb_vm.
@@ -94,7 +94,10 @@ mod tests {
         let v2 = json!({"a": "hello", "z": [1, {"a": 1, "b": 2}]});
         let c1 = serde_json::to_string(&Nrf1Canon.canon(v1)).unwrap();
         let c2 = serde_json::to_string(&Nrf1Canon.canon(v2)).unwrap();
-        assert_eq!(c1, c2, "same data in different order must canonicalize identically");
+        assert_eq!(
+            c1, c2,
+            "same data in different order must canonicalize identically"
+        );
     }
 
     #[test]

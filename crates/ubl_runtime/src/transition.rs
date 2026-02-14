@@ -1,9 +1,9 @@
 //! Transition Receipt: proves the deterministic jump from layer -1 (RB/bytecode)
 //! to layer 0 (rho/canonical). Links preimage_raw_cid → rho_cid with witness metadata.
 
-use serde::{Serialize, Deserialize};
-use crate::cid::cid_b3;
 use crate::canon::canonical_bytes;
+use crate::cid::cid_b3;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransitionReceiptBody {
@@ -88,7 +88,14 @@ pub fn build_transition(
 ) -> TransitionReceiptBody {
     let preimage_raw_cid = cid_b3(raw_bytes);
     let rho_cid = cid_b3(rho_bytes);
-    TransitionReceiptBody::new(preimage_raw_cid, rho_cid, vm_tag, bytecode_cid, fuel_spent, ghost)
+    TransitionReceiptBody::new(
+        preimage_raw_cid,
+        rho_cid,
+        vm_tag,
+        bytecode_cid,
+        fuel_spent,
+        ghost,
+    )
 }
 
 #[cfg(test)]
@@ -134,10 +141,24 @@ mod tests {
     fn transition_receipt_cid_stable_10x() {
         let raw = b"stable test input";
         let rho = b"stable canonical output";
-        let first = build_transition(raw, rho, "rb-vm@0.1.0", Some("b3:abc".into()), Some(99), false);
+        let first = build_transition(
+            raw,
+            rho,
+            "rb-vm@0.1.0",
+            Some("b3:abc".into()),
+            Some(99),
+            false,
+        );
         let first_cid = first.cid().unwrap();
         for _ in 0..10 {
-            let tr = build_transition(raw, rho, "rb-vm@0.1.0", Some("b3:abc".into()), Some(99), false);
+            let tr = build_transition(
+                raw,
+                rho,
+                "rb-vm@0.1.0",
+                Some("b3:abc".into()),
+                Some(99),
+                false,
+            );
             assert_eq!(tr.cid().unwrap(), first_cid);
         }
     }
@@ -154,9 +175,13 @@ mod tests {
         assert_eq!(tr.rho_cid, rho_cid_expected, "replay must match rho_cid");
 
         // Replay: given raw bytes, re-normalize and verify
-        let replay_rho = canonical_bytes(&serde_json::from_slice::<serde_json::Value>(raw).unwrap()).unwrap();
+        let replay_rho =
+            canonical_bytes(&serde_json::from_slice::<serde_json::Value>(raw).unwrap()).unwrap();
         let replay_cid = cid_b3(&replay_rho);
-        assert_eq!(replay_cid, tr.rho_cid, "forensic replay must produce same rho_cid");
+        assert_eq!(
+            replay_cid, tr.rho_cid,
+            "forensic replay must produce same rho_cid"
+        );
     }
 
     #[test]
@@ -170,8 +195,13 @@ mod tests {
         // Mutate 1 byte
         let mut mutated = raw.to_vec();
         mutated[7] = b'8'; // age:18 instead of 17
-        let mutated_rho = canonical_bytes(&serde_json::from_slice::<serde_json::Value>(&mutated).unwrap()).unwrap();
+        let mutated_rho =
+            canonical_bytes(&serde_json::from_slice::<serde_json::Value>(&mutated).unwrap())
+                .unwrap();
         let mutated_cid = cid_b3(&mutated_rho);
-        assert_ne!(mutated_cid, tr.rho_cid, "mutated input must NOT match original rho_cid");
+        assert_ne!(
+            mutated_cid, tr.rho_cid,
+            "mutated input must NOT match original rho_cid"
+        );
     }
 }

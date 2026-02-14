@@ -6,7 +6,9 @@ fn normalize_value(v: &Value) -> Value {
         Value::Null => Value::Null,
         Value::Bool(b) => Value::Bool(*b),
         Value::Number(n) => {
-            if n.is_f64() { panic!("floating point not allowed"); }
+            if n.is_f64() {
+                panic!("floating point not allowed");
+            }
             Value::Number(n.clone())
         }
         Value::String(s) => Value::String(s.nfc().collect::<String>()),

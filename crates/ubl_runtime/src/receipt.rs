@@ -9,10 +9,10 @@
 //! - Idempotency: duplicate body_cid is rejected
 //! - Ghost: ghost=true ⇒ observability.ghost=true, ledger skip signaled
 
-use serde::{Serialize, Deserialize};
-use crate::cid::cid_b3;
 use crate::canon::canonical_bytes;
+use crate::cid::cid_b3;
 use crate::jws::{sign_detached, JwsDetached};
+use serde::{Deserialize, Serialize};
 
 const VALID_TYPES: &[&str] = &["ubl/wa", "ubl/transition", "ubl/wf", "ubl/attestation"];
 
@@ -32,7 +32,14 @@ pub struct Logline {
 }
 
 impl Logline {
-    pub fn now(who: &str, actor_did: &str, what: &str, where_: &str, why: &str, context_id: &str) -> Self {
+    pub fn now(
+        who: &str,
+        actor_did: &str,
+        what: &str,
+        where_: &str,
+        why: &str,
+        context_id: &str,
+    ) -> Self {
         Self {
             who: who.into(),
             actor_did: actor_did.into(),
@@ -49,7 +56,9 @@ impl Logline {
 fn chrono_now_iso() -> String {
     // Simple ISO 8601 timestamp without chrono dependency
     use std::time::SystemTime;
-    let d = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs();
     // Rough UTC: good enough for observability, not for crypto
     let (s, m, h) = (secs % 60, (secs / 60) % 60, (secs / 3600) % 24);
@@ -59,7 +68,15 @@ fn chrono_now_iso() -> String {
     let doy = days % 365;
     let mo = doy / 30 + 1;
     let day = doy % 30 + 1;
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo.min(12), day.min(31), h, m, s)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        mo.min(12),
+        day.min(31),
+        h,
+        m,
+        s
+    )
 }
 
 /// Unified receipt envelope used across all pipeline stages.
@@ -134,7 +151,13 @@ pub struct LoglineContext<'a> {
 
 impl<'a> Default for RunOpts<'a> {
     fn default() -> Self {
-        Self { prev_tip: None, ghost: false, keys: &DEVKEYS, seen: None, logline: None }
+        Self {
+            prev_tip: None,
+            ghost: false,
+            keys: &DEVKEYS,
+            seen: None,
+            logline: None,
+        }
     }
 }
 
@@ -143,9 +166,10 @@ static DEVKEYS: once_cell::sync::Lazy<KeyRing> = once_cell::sync::Lazy::new(KeyR
 /// Validate a receipt against the canonical schema.
 pub fn validate_receipt(rc: &Receipt) -> crate::error::Result<()> {
     if !VALID_TYPES.contains(&rc.t.as_str()) {
-        return Err(crate::error::RuntimeError::Validation(
-            format!("invalid receipt type '{}', expected one of {:?}", rc.t, VALID_TYPES),
-        ));
+        return Err(crate::error::RuntimeError::Validation(format!(
+            "invalid receipt type '{}', expected one of {:?}",
+            rc.t, VALID_TYPES
+        )));
     }
     if rc.body_cid.is_empty() || !rc.body_cid.starts_with("b3:") {
         return Err(crate::error::RuntimeError::Validation(
@@ -166,9 +190,10 @@ pub fn validate_receipt(rc: &Receipt) -> crate::error::Result<()> {
     let body_bytes = canonical_bytes(&rc.body)?;
     let expected_cid = cid_b3(&body_bytes);
     if expected_cid != rc.body_cid {
-        return Err(crate::error::RuntimeError::Validation(
-            format!("body_cid mismatch: expected {}, got {}", expected_cid, rc.body_cid),
-        ));
+        return Err(crate::error::RuntimeError::Validation(format!(
+            "body_cid mismatch: expected {}, got {}",
+            expected_cid, rc.body_cid
+        )));
     }
     Ok(())
 }
@@ -205,7 +230,11 @@ pub fn verify_body_cid(receipt: &Receipt) -> crate::error::Result<bool> {
 }
 
 /// Build the observability JSON for a receipt, merging ghost flag and logline.
-fn make_observability(ghost: bool, logline_ctx: &Option<LoglineContext>, what_suffix: &str) -> Option<serde_json::Value> {
+fn make_observability(
+    ghost: bool,
+    logline_ctx: &Option<LoglineContext>,
+    what_suffix: &str,
+) -> Option<serde_json::Value> {
     let has_ghost = ghost;
     let has_logline = logline_ctx.is_some();
     if !has_ghost && !has_logline {
@@ -216,7 +245,14 @@ fn make_observability(ghost: bool, logline_ctx: &Option<LoglineContext>, what_su
         obs.insert("ghost".into(), serde_json::Value::Bool(true));
     }
     if let Some(ctx) = logline_ctx {
-        let ll = Logline::now(ctx.who, ctx.actor_did, what_suffix, ctx.where_, ctx.why, ctx.context_id);
+        let ll = Logline::now(
+            ctx.who,
+            ctx.actor_did,
+            what_suffix,
+            ctx.where_,
+            ctx.why,
+            ctx.context_id,
+        );
         obs.insert("logline".into(), serde_json::to_value(&ll).unwrap());
     }
     Some(serde_json::Value::Object(obs))
@@ -262,9 +298,10 @@ pub fn run_with_receipts(
     let idempotency_key = format!("{}:{}", manifest.pipeline, inputs_raw_cid);
     if let Some(seen) = opts.seen {
         if seen.contains(&idempotency_key) {
-            return Err(crate::error::RuntimeError::Validation(
-                format!("duplicate request (replay): pipeline={} inputs_cid={}", manifest.pipeline, inputs_raw_cid),
-            ));
+            return Err(crate::error::RuntimeError::Validation(format!(
+                "duplicate request (replay): pipeline={} inputs_cid={}",
+                manifest.pipeline, inputs_raw_cid
+            )));
         }
     }
 
@@ -316,7 +353,13 @@ pub fn run_with_receipts(
             )?;
             wf.observability = make_observability(ghost, &opts.logline, "wf:deny");
             let tip_cid = wf.body_cid.clone();
-            return Ok(RunResult { wa, transition: Some(transition), wf, tip_cid, ghost });
+            return Ok(RunResult {
+                wa,
+                transition: Some(transition),
+                wf,
+                tip_cid,
+                ghost,
+            });
         }
     };
 
@@ -383,7 +426,8 @@ mod tests {
             json!({"inputs_raw_cid": "b3:abc", "intention": "execute"}),
             &test_key(),
             "did:dev#k1",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(rc.t, "ubl/wa");
         assert!(rc.body_cid.starts_with("b3:"));
         assert!(verify_body_cid(&rc).unwrap());
@@ -393,7 +437,14 @@ mod tests {
     fn parents_chain() {
         let key = test_key();
         let rc1 = build_receipt("ubl/wa", vec![], json!({"a":1}), &key, "did:dev#k1").unwrap();
-        let rc2 = build_receipt("ubl/wf", vec![rc1.body_cid.clone()], json!({"b":2}), &key, "did:dev#k1").unwrap();
+        let rc2 = build_receipt(
+            "ubl/wf",
+            vec![rc1.body_cid.clone()],
+            json!({"b":2}),
+            &key,
+            "did:dev#k1",
+        )
+        .unwrap();
         assert_eq!(rc2.parents, vec![rc1.body_cid]);
     }
 
@@ -417,12 +468,16 @@ mod tests {
 
     #[test]
     fn run_with_receipts_produces_three_chained() {
+        use crate::engine::{ExecuteConfig, Grammar, Manifest, Mapping, Policy};
         use std::collections::BTreeMap;
-        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
 
         let in_g = Grammar {
             inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
-            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            mappings: vec![Mapping {
+                from: "raw_b64".into(),
+                codec: "base64.decode".into(),
+                to: "raw.bytes".into(),
+            }],
             output_from: "raw.bytes".into(),
         };
         let out_g = Grammar {
@@ -437,7 +492,9 @@ mod tests {
             policy: Policy { allow: true },
         };
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
-        let cfg = ExecuteConfig { version: "0.1.0".into() };
+        let cfg = ExecuteConfig {
+            version: "0.1.0".into(),
+        };
 
         let result = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
 
@@ -449,11 +506,17 @@ mod tests {
 
         // Chain: WA has no parents, transition parents=[wa], wf parents=[wa, transition]
         assert!(result.wa.parents.is_empty());
-        assert_eq!(result.transition.as_ref().unwrap().parents, vec![result.wa.body_cid.clone()]);
-        assert_eq!(result.wf.parents, vec![
-            result.wa.body_cid.clone(),
-            result.transition.as_ref().unwrap().body_cid.clone(),
-        ]);
+        assert_eq!(
+            result.transition.as_ref().unwrap().parents,
+            vec![result.wa.body_cid.clone()]
+        );
+        assert_eq!(
+            result.wf.parents,
+            vec![
+                result.wa.body_cid.clone(),
+                result.transition.as_ref().unwrap().body_cid.clone(),
+            ]
+        );
 
         // Tip is the WF body_cid
         assert_eq!(result.tip_cid, result.wf.body_cid);
@@ -466,12 +529,16 @@ mod tests {
 
     #[test]
     fn run_with_receipts_deterministic() {
+        use crate::engine::{ExecuteConfig, Grammar, Manifest, Mapping, Policy};
         use std::collections::BTreeMap;
-        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
 
         let in_g = Grammar {
             inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
-            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            mappings: vec![Mapping {
+                from: "raw_b64".into(),
+                codec: "base64.decode".into(),
+                to: "raw.bytes".into(),
+            }],
             output_from: "raw.bytes".into(),
         };
         let out_g = Grammar {
@@ -486,7 +553,9 @@ mod tests {
             policy: Policy { allow: true },
         };
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
-        let cfg = ExecuteConfig { version: "0.1.0".into() };
+        let cfg = ExecuteConfig {
+            version: "0.1.0".into(),
+        };
 
         let r1 = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
         let r2 = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
@@ -500,12 +569,16 @@ mod tests {
 
     #[test]
     fn wf_body_contains_decision_allow() {
+        use crate::engine::{ExecuteConfig, Grammar, Manifest, Mapping, Policy};
         use std::collections::BTreeMap;
-        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
 
         let in_g = Grammar {
             inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
-            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            mappings: vec![Mapping {
+                from: "raw_b64".into(),
+                codec: "base64.decode".into(),
+                to: "raw.bytes".into(),
+            }],
             output_from: "raw.bytes".into(),
         };
         let out_g = Grammar {
@@ -520,11 +593,16 @@ mod tests {
             policy: Policy { allow: true },
         };
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
-        let cfg = ExecuteConfig { version: "0.1.0".into() };
+        let cfg = ExecuteConfig {
+            version: "0.1.0".into(),
+        };
 
         let result = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
         assert_eq!(result.wf.body["decision"], "ALLOW");
-        assert!(result.wf.body["outputs_cid"].as_str().unwrap().starts_with("b3:"));
+        assert!(result.wf.body["outputs_cid"]
+            .as_str()
+            .unwrap()
+            .starts_with("b3:"));
     }
 
     // ── Schema validation tests ──────────────────────────────────
@@ -534,7 +612,10 @@ mod tests {
         let key = test_key();
         let err = build_receipt("ubl/bogus", vec![], json!({"a":1}), &key, "did:dev#k1");
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("invalid receipt type"));
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("invalid receipt type"));
     }
 
     #[test]
@@ -549,17 +630,29 @@ mod tests {
 
     #[test]
     fn ghost_mode_sets_observability() {
-        use std::collections::BTreeMap;
-        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
-
         let (manifest, vars, cfg) = test_manifest_vars_cfg();
         let keys = KeyRing::dev();
-        let opts = RunOpts { prev_tip: None, ghost: true, keys: &keys, seen: None, logline: None };
+        let opts = RunOpts {
+            prev_tip: None,
+            ghost: true,
+            keys: &keys,
+            seen: None,
+            logline: None,
+        };
         let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
 
         assert!(result.ghost);
         assert_eq!(result.wa.observability.as_ref().unwrap()["ghost"], true);
-        assert_eq!(result.transition.as_ref().unwrap().observability.as_ref().unwrap()["ghost"], true);
+        assert_eq!(
+            result
+                .transition
+                .as_ref()
+                .unwrap()
+                .observability
+                .as_ref()
+                .unwrap()["ghost"],
+            true
+        );
         assert_eq!(result.wf.observability.as_ref().unwrap()["ghost"], true);
     }
 
@@ -581,10 +674,19 @@ mod tests {
         seen.insert(idemp_key);
 
         // Run with same input should be rejected as replay
-        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: Some(&seen), logline: None };
+        let opts = RunOpts {
+            prev_tip: None,
+            ghost: false,
+            keys: &keys,
+            seen: Some(&seen),
+            logline: None,
+        };
         let err = run_with_receipts(&manifest, &vars, &cfg, &opts);
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("duplicate request (replay)"));
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate request (replay)"));
     }
 
     // ── Prev-tip chaining tests ──────────────────────────────────
@@ -592,7 +694,8 @@ mod tests {
     #[test]
     fn prev_tip_appears_in_wa_parents() {
         let (manifest, vars, cfg) = test_manifest_vars_cfg();
-        let result = run_with_receipts_simple(&manifest, &vars, &cfg, Some("b3:prev_tip_abc")).unwrap();
+        let result =
+            run_with_receipts_simple(&manifest, &vars, &cfg, Some("b3:prev_tip_abc")).unwrap();
         assert_eq!(result.wa.parents[0], "b3:prev_tip_abc");
     }
 
@@ -600,12 +703,16 @@ mod tests {
 
     #[test]
     fn engine_failure_produces_deny_wf() {
+        use crate::engine::{ExecuteConfig, Grammar, Manifest, Mapping, Policy};
         use std::collections::BTreeMap;
-        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
 
         let in_g = Grammar {
             inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
-            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            mappings: vec![Mapping {
+                from: "raw_b64".into(),
+                codec: "base64.decode".into(),
+                to: "raw.bytes".into(),
+            }],
             output_from: "raw.bytes".into(),
         };
         let out_g = Grammar {
@@ -620,12 +727,17 @@ mod tests {
             policy: Policy { allow: false }, // will cause policy deny
         };
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
-        let cfg = ExecuteConfig { version: "0.1.0".into() };
+        let cfg = ExecuteConfig {
+            version: "0.1.0".into(),
+        };
 
         // Should NOT return Err — should produce a DENY WF receipt
         let result = run_with_receipts_simple(&manifest, &vars, &cfg, None).unwrap();
         assert_eq!(result.wf.body["decision"], "DENY");
-        assert!(result.wf.body["reason"].as_str().unwrap().contains("policy deny"));
+        assert!(result.wf.body["reason"]
+            .as_str()
+            .unwrap()
+            .contains("policy deny"));
         assert!(result.wf.body["outputs_cid"].is_null());
     }
 
@@ -641,7 +753,13 @@ mod tests {
             next_kid: Some("did:custom#k3".into()),
         };
         let (manifest, vars, cfg) = test_manifest_vars_cfg();
-        let opts = RunOpts { prev_tip: None, ghost: false, keys: &keys, seen: None, logline: None };
+        let opts = RunOpts {
+            prev_tip: None,
+            ghost: false,
+            keys: &keys,
+            seen: None,
+            logline: None,
+        };
         let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
         assert_eq!(result.wa.proof.kid, "did:custom#k2");
         assert_eq!(result.wf.proof.kid, "did:custom#k2");
@@ -661,20 +779,29 @@ mod tests {
             context_id: "ctx-001",
         };
         let opts = RunOpts {
-            prev_tip: None, ghost: false, keys: &keys, seen: None,
+            prev_tip: None,
+            ghost: false,
+            keys: &keys,
+            seen: None,
             logline: Some(ctx),
         };
         let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
 
         // All three receipts should have observability.logline
         for (label, rc) in [("wa", &result.wa), ("wf", &result.wf)] {
-            let obs = rc.observability.as_ref().expect(&format!("{} missing observability", label));
+            let obs = rc
+                .observability
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label} missing observability"));
             let ll = &obs["logline"];
-            assert_eq!(ll["who"], "test-runner", "{} logline.who", label);
-            assert_eq!(ll["actor_did"], "did:dev#k1", "{} logline.actor_did", label);
-            assert_eq!(ll["context_id"], "ctx-001", "{} logline.context_id", label);
-            assert!(!ll["when_iso"].as_str().unwrap().is_empty(), "{} logline.when_iso", label);
-            assert_eq!(ll["version"], "0.1.0", "{} logline.version", label);
+            assert_eq!(ll["who"], "test-runner", "{label} logline.who");
+            assert_eq!(ll["actor_did"], "did:dev#k1", "{label} logline.actor_did");
+            assert_eq!(ll["context_id"], "ctx-001", "{label} logline.context_id");
+            assert!(
+                !ll["when_iso"].as_str().unwrap().is_empty(),
+                "{label} logline.when_iso"
+            );
+            assert_eq!(ll["version"], "0.1.0", "{label} logline.version");
         }
         let tr = result.transition.as_ref().unwrap();
         let tr_ll = &tr.observability.as_ref().unwrap()["logline"];
@@ -682,7 +809,13 @@ mod tests {
         assert!(tr_ll["what"].as_str().unwrap().contains("transition"));
 
         // ghost should NOT be present when ghost=false
-        assert!(result.wa.observability.as_ref().unwrap().get("ghost").is_none());
+        assert!(result
+            .wa
+            .observability
+            .as_ref()
+            .unwrap()
+            .get("ghost")
+            .is_none());
     }
 
     #[test]
@@ -697,7 +830,10 @@ mod tests {
             context_id: "ctx-ghost",
         };
         let opts = RunOpts {
-            prev_tip: None, ghost: true, keys: &keys, seen: None,
+            prev_tip: None,
+            ghost: true,
+            keys: &keys,
+            seen: None,
             logline: Some(ctx),
         };
         let result = run_with_receipts(&manifest, &vars, &cfg, &opts).unwrap();
@@ -713,12 +849,16 @@ mod tests {
         std::collections::BTreeMap<String, serde_json::Value>,
         crate::engine::ExecuteConfig,
     ) {
+        use crate::engine::{ExecuteConfig, Grammar, Manifest, Mapping, Policy};
         use std::collections::BTreeMap;
-        use crate::engine::{Manifest, Grammar, Mapping, Policy, ExecuteConfig};
 
         let in_g = Grammar {
             inputs: BTreeMap::from([("raw_b64".into(), json!(""))]),
-            mappings: vec![Mapping { from: "raw_b64".into(), codec: "base64.decode".into(), to: "raw.bytes".into() }],
+            mappings: vec![Mapping {
+                from: "raw_b64".into(),
+                codec: "base64.decode".into(),
+                to: "raw.bytes".into(),
+            }],
             output_from: "raw.bytes".into(),
         };
         let out_g = Grammar {
@@ -733,7 +873,9 @@ mod tests {
             policy: Policy { allow: true },
         };
         let vars = BTreeMap::from([("input_data".into(), json!("aGVsbG8="))]);
-        let cfg = ExecuteConfig { version: "0.1.0".into() };
+        let cfg = ExecuteConfig {
+            version: "0.1.0".into(),
+        };
         (manifest, vars, cfg)
     }
 }

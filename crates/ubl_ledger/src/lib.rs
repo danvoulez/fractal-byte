@@ -1,4 +1,3 @@
-
 use anyhow::Result;
 use cid::Cid;
 use std::path::PathBuf;
@@ -10,21 +9,30 @@ const RECEIPT_DIR: &str = "index/receipt";
 fn cid_path(cid: &Cid, ext: &str) -> PathBuf {
     let s = cid.to_string();
     let (p1, p2) = (&s[2..4], &s[4..6]);
-    PathBuf::from(STORE_DIR).join(p1).join(p2).join(format!("{}.{}", s, ext))
+    PathBuf::from(STORE_DIR)
+        .join(p1)
+        .join(p2)
+        .join(format!("{s}.{ext}"))
 }
 
 fn receipt_path(cid: &Cid) -> PathBuf {
-    PathBuf::from(RECEIPT_DIR).join(format!("{}.json", cid))
+    PathBuf::from(RECEIPT_DIR).join(format!("{cid}.json"))
 }
 
 fn tenant_cid_path(tenant: &str, cid: &Cid, ext: &str) -> PathBuf {
     let s = cid.to_string();
     let (p1, p2) = (&s[2..4], &s[4..6]);
-    PathBuf::from(STORE_DIR).join(tenant).join(p1).join(p2).join(format!("{}.{}", s, ext))
+    PathBuf::from(STORE_DIR)
+        .join(tenant)
+        .join(p1)
+        .join(p2)
+        .join(format!("{s}.{ext}"))
 }
 
 fn tenant_receipt_path(tenant: &str, cid: &Cid) -> PathBuf {
-    PathBuf::from(RECEIPT_DIR).join(tenant).join(format!("{}.json", cid))
+    PathBuf::from(RECEIPT_DIR)
+        .join(tenant)
+        .join(format!("{cid}.json"))
 }
 
 pub async fn put(cid: &Cid, bytes: &[u8]) -> Result<()> {
@@ -63,7 +71,9 @@ pub async fn tenant_put(tenant: &str, cid: &Cid, bytes: &[u8]) -> Result<()> {
 }
 
 pub async fn tenant_exists(tenant: &str, cid: &Cid) -> bool {
-    fs::try_exists(tenant_cid_path(tenant, cid, "nrf")).await.unwrap_or(false)
+    fs::try_exists(tenant_cid_path(tenant, cid, "nrf"))
+        .await
+        .unwrap_or(false)
 }
 
 pub async fn tenant_get_raw(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
@@ -85,7 +95,7 @@ pub async fn tenant_get_receipt(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
 
 #[cfg(feature = "s3")]
 pub mod s3 {
-    use anyhow::{Result, Context};
+    use anyhow::{Context, Result};
 
     /// S3-backed ledger with Content-MD5 integrity, SSE-S3 encryption,
     /// sharded key layout, and head/exists support.
@@ -103,7 +113,11 @@ pub mod s3 {
                 .load()
                 .await;
             let client = aws_sdk_s3::Client::new(&config);
-            Ok(Self { client, bucket, prefix })
+            Ok(Self {
+                client,
+                bucket,
+                prefix,
+            })
         }
 
         /// Shard key: prefix + first 2 chars / next 2 chars / full cid
@@ -142,7 +156,8 @@ pub mod s3 {
 
         /// Get bytes by CID. Returns None if not found.
         pub async fn get(&self, cid: &str) -> Option<Vec<u8>> {
-            let out = self.client
+            let out = self
+                .client
                 .get_object()
                 .bucket(&self.bucket)
                 .key(self.s3_key(cid))
@@ -154,7 +169,8 @@ pub mod s3 {
 
         /// Head check: returns (exists, content_length) without downloading body.
         pub async fn head(&self, cid: &str) -> Result<(bool, u64)> {
-            match self.client
+            match self
+                .client
                 .head_object()
                 .bucket(&self.bucket)
                 .key(self.s3_key(cid))
@@ -196,7 +212,8 @@ pub mod s3 {
         /// Get a receipt JSON by CID.
         pub async fn get_receipt(&self, cid: &str) -> Option<Vec<u8>> {
             let key = format!("{}receipts/{}", self.prefix, cid.replace(':', "_"));
-            let out = self.client
+            let out = self
+                .client
                 .get_object()
                 .bucket(&self.bucket)
                 .key(&key)
@@ -209,19 +226,18 @@ pub mod s3 {
         /// Configure lifecycle rule: expire objects with given prefix after `days`.
         pub async fn set_lifecycle_expiry(&self, rule_prefix: &str, days: i32) -> Result<()> {
             use aws_sdk_s3::types::{
-                BucketLifecycleConfiguration, ExpirationStatus,
-                LifecycleExpiration, LifecycleRule, LifecycleRuleFilter,
+                BucketLifecycleConfiguration, ExpirationStatus, LifecycleExpiration, LifecycleRule,
+                LifecycleRuleFilter,
             };
 
             let rule = LifecycleRule::builder()
                 .id(format!("ubl-expire-{}", rule_prefix.replace('/', "-")))
                 .status(ExpirationStatus::Enabled)
-                .filter(LifecycleRuleFilter::Prefix(format!("{}{}", self.prefix, rule_prefix)))
-                .expiration(
-                    LifecycleExpiration::builder()
-                        .days(days)
-                        .build()
-                )
+                .filter(LifecycleRuleFilter::Prefix(format!(
+                    "{}{}",
+                    self.prefix, rule_prefix
+                )))
+                .expiration(LifecycleExpiration::builder().days(days).build())
                 .build()
                 .context("lifecycle rule build")?;
 
@@ -259,8 +275,16 @@ pub mod s3 {
             let n = (b0 << 16) | (b1 << 8) | b2;
             out.push(CHARS[((n >> 18) & 63) as usize] as char);
             out.push(CHARS[((n >> 12) & 63) as usize] as char);
-            if chunk.len() > 1 { out.push(CHARS[((n >> 6) & 63) as usize] as char); } else { out.push('='); }
-            if chunk.len() > 2 { out.push(CHARS[(n & 63) as usize] as char); } else { out.push('='); }
+            if chunk.len() > 1 {
+                out.push(CHARS[((n >> 6) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(CHARS[(n & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
         }
         out
     }
@@ -272,7 +296,9 @@ pub mod s3 {
     }
 
     impl Md5Context {
-        fn new() -> Self { Self { buf: Vec::new() } }
+        fn new() -> Self {
+            Self { buf: Vec::new() }
+        }
         fn finish(&self) -> [u8; 16] {
             // Use the md5 crate if available, otherwise fallback to zero-hash
             // In production, add `md5 = "0.7"` to Cargo.toml
@@ -292,6 +318,8 @@ pub mod s3 {
             self.buf.extend_from_slice(buf);
             Ok(buf.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

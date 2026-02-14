@@ -1,4 +1,3 @@
-
 // NRF-1.1 canonical encoding and CID
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -39,10 +38,27 @@ fn encode_value(value: &NrfValue, buf: &mut Vec<u8>) -> Result<()> {
         NrfValue::Null => buf.push(TAG_NULL),
         NrfValue::Bool(false) => buf.push(TAG_FALSE),
         NrfValue::Bool(true) => buf.push(TAG_TRUE),
-        NrfValue::Int(i) => { buf.push(TAG_INT64); buf.extend_from_slice(&i.to_be_bytes()); }
-        NrfValue::String(s) => { buf.push(TAG_STRING); encode_varint32(s.len() as u32, buf); buf.extend_from_slice(s.as_bytes()); }
-        NrfValue::Bytes(b) => { buf.push(TAG_BYTES); encode_varint32(b.len() as u32, buf); buf.extend_from_slice(b); }
-        NrfValue::Array(arr) => { buf.push(TAG_ARRAY); encode_varint32(arr.len() as u32, buf); for item in arr { encode_value(item, buf)?; } }
+        NrfValue::Int(i) => {
+            buf.push(TAG_INT64);
+            buf.extend_from_slice(&i.to_be_bytes());
+        }
+        NrfValue::String(s) => {
+            buf.push(TAG_STRING);
+            encode_varint32(s.len() as u32, buf);
+            buf.extend_from_slice(s.as_bytes());
+        }
+        NrfValue::Bytes(b) => {
+            buf.push(TAG_BYTES);
+            encode_varint32(b.len() as u32, buf);
+            buf.extend_from_slice(b);
+        }
+        NrfValue::Array(arr) => {
+            buf.push(TAG_ARRAY);
+            encode_varint32(arr.len() as u32, buf);
+            for item in arr {
+                encode_value(item, buf)?;
+            }
+        }
         NrfValue::Map(map) => {
             buf.push(TAG_MAP);
             encode_varint32(map.len() as u32, buf);
@@ -59,16 +75,27 @@ fn encode_varint32(mut n: u32, buf: &mut Vec<u8>) {
     loop {
         let mut byte = (n & 0x7f) as u8;
         n >>= 7;
-        if n != 0 { byte |= 0x80; buf.push(byte); } else { buf.push(byte); break; }
+        if n != 0 {
+            byte |= 0x80;
+            buf.push(byte);
+        } else {
+            buf.push(byte);
+            break;
+        }
     }
 }
 
 pub fn decode_from_slice(bytes: &[u8]) -> Result<NrfValue> {
     let mut cursor = Cursor::new(bytes);
-    let mut magic = [0u8; 4]; cursor.read_exact(&mut magic)?;
-    if magic != MAGIC { bail!("InvalidMagic"); }
+    let mut magic = [0u8; 4];
+    cursor.read_exact(&mut magic)?;
+    if magic != MAGIC {
+        bail!("InvalidMagic");
+    }
     let value = decode_value(&mut cursor)?;
-    if cursor.position() != bytes.len() as u64 { bail!("TrailingData"); }
+    if cursor.position() != bytes.len() as u64 {
+        bail!("TrailingData");
+    }
     Ok(value)
 }
 
@@ -79,22 +106,49 @@ fn decode_value<R: Read>(r: &mut R) -> Result<NrfValue> {
         TAG_NULL => Ok(NrfValue::Null),
         TAG_FALSE => Ok(NrfValue::Bool(false)),
         TAG_TRUE => Ok(NrfValue::Bool(true)),
-        TAG_INT64 => { let mut buf = [0u8; 8]; r.read_exact(&mut buf)?; Ok(NrfValue::Int(i64::from_be_bytes(buf))) }
+        TAG_INT64 => {
+            let mut buf = [0u8; 8];
+            r.read_exact(&mut buf)?;
+            Ok(NrfValue::Int(i64::from_be_bytes(buf)))
+        }
         TAG_STRING => {
             let len = decode_varint32(r)?;
-            let mut buf = vec![0u8; len as usize]; r.read_exact(&mut buf)?;
+            let mut buf = vec![0u8; len as usize];
+            r.read_exact(&mut buf)?;
             let s = String::from_utf8(buf).context("InvalidUTF8")?;
-            if s.chars().any(|c| c == '\u{feff}') { bail!("BOMPresent"); }
-            if s.nfc().collect::<String>() != s { bail!("NotNFC"); }
+            if s.chars().any(|c| c == '\u{feff}') {
+                bail!("BOMPresent");
+            }
+            if s.nfc().collect::<String>() != s {
+                bail!("NotNFC");
+            }
             Ok(NrfValue::String(s))
         }
-        TAG_BYTES => { let len = decode_varint32(r)?; let mut buf = vec![0u8; len as usize]; r.read_exact(&mut buf)?; Ok(NrfValue::Bytes(buf)) }
-        TAG_ARRAY => { let count = decode_varint32(r)?; let mut arr = Vec::with_capacity(count as usize); for _ in 0..count { arr.push(decode_value(r)?); } Ok(NrfValue::Array(arr)) }
-        TAG_MAP => {
-            let count = decode_varint32(r)?; let mut map = BTreeMap::new();
+        TAG_BYTES => {
+            let len = decode_varint32(r)?;
+            let mut buf = vec![0u8; len as usize];
+            r.read_exact(&mut buf)?;
+            Ok(NrfValue::Bytes(buf))
+        }
+        TAG_ARRAY => {
+            let count = decode_varint32(r)?;
+            let mut arr = Vec::with_capacity(count as usize);
             for _ in 0..count {
-                let key = match decode_value(r)? { NrfValue::String(s) => s, _ => bail!("NonStringKey"), };
-                if map.contains_key(&key) { bail!("DuplicateKey({})", key); }
+                arr.push(decode_value(r)?);
+            }
+            Ok(NrfValue::Array(arr))
+        }
+        TAG_MAP => {
+            let count = decode_varint32(r)?;
+            let mut map = BTreeMap::new();
+            for _ in 0..count {
+                let key = match decode_value(r)? {
+                    NrfValue::String(s) => s,
+                    _ => bail!("NonStringKey"),
+                };
+                if map.contains_key(&key) {
+                    bail!("DuplicateKey({key})");
+                }
                 let value = decode_value(r)?;
                 map.insert(key, value);
             }
@@ -105,15 +159,26 @@ fn decode_value<R: Read>(r: &mut R) -> Result<NrfValue> {
 }
 
 fn decode_varint32<R: Read>(r: &mut R) -> Result<u32> {
-    let mut result = 0u32; let mut shift = 0; let mut bytes_read = 0;
+    let mut result = 0u32;
+    let mut shift = 0;
+    let mut bytes_read = 0;
     loop {
-        let mut byte = [0u8; 1]; r.read_exact(&mut byte)?; bytes_read += 1;
+        let mut byte = [0u8; 1];
+        r.read_exact(&mut byte)?;
+        bytes_read += 1;
         let b = byte[0];
         result |= ((b & 0x7f) as u32) << shift;
-        if (b & 0x80) == 0 { break; }
-        shift += 7; if shift > 28 || bytes_read > 5 { bail!("NonMinimalVarint"); }
+        if (b & 0x80) == 0 {
+            break;
+        }
+        shift += 7;
+        if shift > 28 || bytes_read > 5 {
+            bail!("NonMinimalVarint");
+        }
     }
-    if bytes_read > 1 && (result >> (7 * (bytes_read - 1))) == 0 { bail!("NonMinimalVarint"); }
+    if bytes_read > 1 && (result >> (7 * (bytes_read - 1))) == 0 {
+        bail!("NonMinimalVarint");
+    }
     Ok(result)
 }
 
@@ -121,24 +186,42 @@ pub fn json_to_nrf(value: &Value) -> Result<NrfValue> {
     match value {
         Value::Null => Ok(NrfValue::Null),
         Value::Bool(b) => Ok(NrfValue::Bool(*b)),
-        Value::Number(n) => { if n.is_i64() { Ok(NrfValue::Int(n.as_i64().unwrap())) } else { bail!("Number must be i64"); } }
+        Value::Number(n) => {
+            if n.is_i64() {
+                Ok(NrfValue::Int(n.as_i64().unwrap()))
+            } else {
+                bail!("Number must be i64");
+            }
+        }
         Value::String(s) => {
-            if s.chars().any(|c| c == '\u{feff}') { bail!("BOMPresent"); }
-            if s.nfc().collect::<String>() != *s { bail!("NotNFC"); }
+            if s.chars().any(|c| c == '\u{feff}') {
+                bail!("BOMPresent");
+            }
+            if s.nfc().collect::<String>() != *s {
+                bail!("NotNFC");
+            }
             Ok(NrfValue::String(s.clone()))
         }
         Value::Array(arr) => {
             let mut items = Vec::with_capacity(arr.len());
-            for v in arr { items.push(json_to_nrf(v)?); }
+            for v in arr {
+                items.push(json_to_nrf(v)?);
+            }
             Ok(NrfValue::Array(items))
         }
         Value::Object(map) => {
             let mut bt = BTreeMap::new();
             for (k, v) in map {
-                if k.chars().any(|c| c == '\u{feff}') { bail!("BOMPresent in key"); }
-                if k.nfc().collect::<String>() != *k { bail!("NotNFC in key"); }
+                if k.chars().any(|c| c == '\u{feff}') {
+                    bail!("BOMPresent in key");
+                }
+                if k.nfc().collect::<String>() != *k {
+                    bail!("NotNFC in key");
+                }
                 let nrf_val = json_to_nrf(v)?;
-                if bt.insert(k.clone(), nrf_val).is_some() { bail!("DuplicateKey({})", k); }
+                if bt.insert(k.clone(), nrf_val).is_some() {
+                    bail!("DuplicateKey({k})");
+                }
             }
             Ok(NrfValue::Map(bt))
         }
@@ -316,7 +399,7 @@ mod tests {
 
     #[test]
     fn json_to_nrf_rejects_float() {
-        let j = json!(3.14);
+        let j = json!(std::f64::consts::PI);
         let err = json_to_nrf(&j);
         assert!(err.is_err(), "floats must be rejected");
         assert!(err.unwrap_err().to_string().contains("i64"));

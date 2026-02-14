@@ -1,25 +1,25 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Opcode {
-    ConstI64      = 0x01,
-    ConstBytes    = 0x02,
+    ConstI64 = 0x01,
+    ConstBytes = 0x02,
     JsonNormalize = 0x03,
-    JsonValidate  = 0x04,
-    AddI64        = 0x05,
-    SubI64        = 0x06,
-    MulI64        = 0x07,
-    CmpI64        = 0x08, // payload: 1 byte operator (0 EQ,1 NE,2 LT,3 LE,4 GT,5 GE)
-    AssertTrue    = 0x09,
-    HashBlake3    = 0x0A,
-    CasPut        = 0x0B,
-    CasGet        = 0x0C,
-    SetRcBody     = 0x0D,
-    AttachProof   = 0x0E,
-    SignDefault   = 0x0F,
-    EmitRc        = 0x10,
-    Drop          = 0x11,
-    PushInput     = 0x12, // payload: u16 index
-    JsonGetKey    = 0x13, // payload: utf-8 key
+    JsonValidate = 0x04,
+    AddI64 = 0x05,
+    SubI64 = 0x06,
+    MulI64 = 0x07,
+    CmpI64 = 0x08, // payload: 1 byte operator (0 EQ,1 NE,2 LT,3 LE,4 GT,5 GE)
+    AssertTrue = 0x09,
+    HashBlake3 = 0x0A,
+    CasPut = 0x0B,
+    CasGet = 0x0C,
+    SetRcBody = 0x0D,
+    AttachProof = 0x0E,
+    SignDefault = 0x0F,
+    EmitRc = 0x10,
+    Drop = 0x11,
+    PushInput = 0x12,  // payload: u16 index
+    JsonGetKey = 0x13, // payload: utf-8 key
 }
 
 impl TryFrom<u8> for Opcode {

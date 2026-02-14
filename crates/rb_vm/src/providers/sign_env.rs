@@ -1,5 +1,5 @@
 use crate::exec::SignProvider;
-use ed25519_dalek::{SigningKey, Signer};
+use ed25519_dalek::{Signer, SigningKey};
 use std::sync::Arc;
 
 /// Assinador baseado em chave Ed25519 carregada de bytes (ENV/arquivo).
@@ -10,11 +10,16 @@ pub struct EnvSigner {
 }
 
 impl EnvSigner {
-    pub fn from_seed_bytes(kid: impl Into<String>, seed32: [u8;32]) -> Self {
+    pub fn from_seed_bytes(kid: impl Into<String>, seed32: [u8; 32]) -> Self {
         let key = SigningKey::from_bytes(&seed32);
-        Self{ kid: kid.into(), key: Arc::new(key) }
+        Self {
+            kid: kid.into(),
+            key: Arc::new(key),
+        }
     }
-    pub fn kid(&self) -> &str { &self.kid }
+    pub fn kid(&self) -> &str {
+        &self.kid
+    }
 }
 
 impl SignProvider for EnvSigner {
@@ -23,5 +28,7 @@ impl SignProvider for EnvSigner {
         let sig = self.key.sign(payload_nrf_bytes);
         sig.to_bytes().to_vec()
     }
-    fn kid(&self) -> String { self.kid.clone() }
+    fn kid(&self) -> String {
+        self.kid.clone()
+    }
 }

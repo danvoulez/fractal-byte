@@ -1,32 +1,50 @@
-
-use axum::{extract::{Path, State}, http::{StatusCode, header}, response::IntoResponse, Json, Extension};
 use crate::{AppState, ClientInfo};
+use axum::{
+    extract::{Path, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+    Extension, Json,
+};
 use base64::Engine;
+use cid::Cid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use cid::Cid;
 use ubl_ai_nrf1::nrf::{self, NrfValue};
-use ubl_ai_nrf1::nrf::{encode_to_vec, cid_from_nrf_bytes, json_to_nrf};
+use ubl_ai_nrf1::nrf::{cid_from_nrf_bytes, encode_to_vec, json_to_nrf};
 use ubl_config::BASE_URL;
 
 #[derive(Debug, Deserialize)]
-pub struct IngestReq { pub payload: Value, pub certify: Option<bool> }
+pub struct IngestReq {
+    pub payload: Value,
+    pub certify: Option<bool>,
+}
 
 pub async fn ingest(
     client: Option<Extension<ClientInfo>>,
     Json(req): Json<IngestReq>,
 ) -> impl IntoResponse {
-    let tenant = client.as_ref().map(|Extension(ci)| ci.tenant_id.as_str()).unwrap_or("default");
-    let nrf_val = match json_to_nrf(&req.payload) { Ok(v)=>v, Err(e)=> return (StatusCode::BAD_REQUEST, e.to_string()).into_response() };
-    let nrf_bytes = match encode_to_vec(&nrf_val) { Ok(b)=>b, Err(e)=> return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response() };
+    let tenant = client
+        .as_ref()
+        .map(|Extension(ci)| ci.tenant_id.as_str())
+        .unwrap_or("default");
+    let nrf_val = match json_to_nrf(&req.payload) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let nrf_bytes = match encode_to_vec(&nrf_val) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
     let cid = cid_from_nrf_bytes(&nrf_bytes);
     if !ubl_ledger::tenant_exists(tenant, &cid).await {
         if let Err(e) = ubl_ledger::tenant_put(tenant, &cid, &nrf_bytes).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     }
-    if req.certify.unwrap_or(false) { let _ = ubl_receipt::issue_receipt(&cid, nrf_bytes.len()).await; }
+    if req.certify.unwrap_or(false) {
+        let _ = ubl_receipt::issue_receipt(&cid, nrf_bytes.len()).await;
+    }
     let resp = json!({
         "cid": cid.to_string(),
         "did": format!("did:cid:{}", cid),
@@ -41,7 +59,9 @@ pub async fn ingest(
 
 /// Resolve raw bytes for a CID: try tenant path first, then legacy.
 async fn resolve_raw(tenant: &str, cid: &Cid) -> Option<Vec<u8>> {
-    if let Some(b) = ubl_ledger::tenant_get_raw(tenant, cid).await { return Some(b); }
+    if let Some(b) = ubl_ledger::tenant_get_raw(tenant, cid).await {
+        return Some(b);
+    }
     ubl_ledger::get_raw(cid).await
 }
 
@@ -49,7 +69,10 @@ pub async fn get_cid_dispatch(
     client: Option<Extension<ClientInfo>>,
     Path(cid_str): Path<String>,
 ) -> impl IntoResponse {
-    let tenant = client.as_ref().map(|Extension(ci)| ci.tenant_id.as_str()).unwrap_or("default");
+    let tenant = client
+        .as_ref()
+        .map(|Extension(ci)| ci.tenant_id.as_str())
+        .unwrap_or("default");
     if let Some(bare) = cid_str.strip_suffix(".json") {
         return get_cid_json_inner(tenant, bare).await;
     }
@@ -57,20 +80,25 @@ pub async fn get_cid_dispatch(
 }
 
 async fn get_cid_inner(tenant: &str, cid_str: &str) -> axum::response::Response {
-    let cid = match Cid::try_from(cid_str) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
+    let cid = match Cid::try_from(cid_str) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid CID").into_response(),
+    };
     match resolve_raw(tenant, &cid).await {
-        Some(bytes) => {
-            ([
-                (header::CONTENT_TYPE, "application/x-nrf"),
-            ], bytes).into_response()
-        }
-        None => (StatusCode::NOT_FOUND, "not found").into_response()
+        Some(bytes) => ([(header::CONTENT_TYPE, "application/x-nrf")], bytes).into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
 async fn get_cid_json_inner(tenant: &str, cid_str: &str) -> axum::response::Response {
-    let cid = match Cid::try_from(cid_str) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
-    let bytes = match resolve_raw(tenant, &cid).await { Some(b)=>b, None=> return (StatusCode::NOT_FOUND, "not found").into_response() };
+    let cid = match Cid::try_from(cid_str) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid CID").into_response(),
+    };
+    let bytes = match resolve_raw(tenant, &cid).await {
+        Some(b) => b,
+        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
     if let Ok(nrf_val) = nrf::decode_from_slice(&bytes) {
         return (StatusCode::OK, Json(nrf_value_to_json(&nrf_val))).into_response();
     }
@@ -94,7 +122,9 @@ fn nrf_value_to_json(v: &NrfValue) -> Value {
         NrfValue::Array(arr) => Value::Array(arr.iter().map(nrf_value_to_json).collect()),
         NrfValue::Map(map) => {
             let mut obj = serde_json::Map::new();
-            for (k,v) in map { obj.insert(k.clone(), nrf_value_to_json(v)); }
+            for (k, v) in map {
+                obj.insert(k.clone(), nrf_value_to_json(v));
+            }
             Value::Object(obj)
         }
     }
@@ -104,20 +134,44 @@ pub async fn certify_cid(
     client: Option<Extension<ClientInfo>>,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
-    let tenant = client.as_ref().map(|Extension(ci)| ci.tenant_id.as_str()).unwrap_or("default");
-    let cid_str = match payload.get("cid").and_then(|v| v.as_str()) { Some(s)=>s, None=> return (StatusCode::BAD_REQUEST, "missing cid").into_response() };
-    let cid = match Cid::try_from(cid_str) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
-    let bytes = match resolve_raw(tenant, &cid).await { Some(b)=>b, None=> return (StatusCode::NOT_FOUND, "content not found").into_response() };
+    let tenant = client
+        .as_ref()
+        .map(|Extension(ci)| ci.tenant_id.as_str())
+        .unwrap_or("default");
+    let cid_str = match payload.get("cid").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return (StatusCode::BAD_REQUEST, "missing cid").into_response(),
+    };
+    let cid = match Cid::try_from(cid_str) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid CID").into_response(),
+    };
+    let bytes = match resolve_raw(tenant, &cid).await {
+        Some(b) => b,
+        None => return (StatusCode::NOT_FOUND, "content not found").into_response(),
+    };
     match ubl_receipt::issue_receipt(&cid, bytes.len()).await {
         Ok(jws) => Json(json!({ "receipt": jws })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("certify failed: {}", e)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("certify failed: {e}"),
+        )
+            .into_response(),
     }
 }
 
 pub async fn get_receipt(Path(cid_str): Path<String>) -> impl IntoResponse {
-    let cid = match Cid::try_from(cid_str.as_str()) { Ok(c)=>c, Err(_)=> return (StatusCode::BAD_REQUEST, "invalid CID").into_response() };
+    let cid = match Cid::try_from(cid_str.as_str()) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid CID").into_response(),
+    };
     match ubl_receipt::get_receipt(&cid).await {
-        Some(jws) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/jose+json")], jws).into_response(),
+        Some(jws) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/jose+json")],
+            jws,
+        )
+            .into_response(),
         None => (StatusCode::NOT_FOUND, "receipt not found").into_response(),
     }
 }
@@ -160,11 +214,21 @@ pub struct ExecRbResponse {
     pub transition_receipt: Option<Value>,
 }
 
-pub async fn execute_rb(State(state): State<AppState>, Json(req): Json<ExecRbRequest>) -> impl IntoResponse {
-    let chip = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.chip_b64) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid base64 chip"}))).into_response(),
-    };
+pub async fn execute_rb(
+    State(state): State<AppState>,
+    Json(req): Json<ExecRbRequest>,
+) -> impl IntoResponse {
+    let chip =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.chip_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "invalid base64 chip"})),
+                )
+                    .into_response()
+            }
+        };
     let rb_req = ubl_runtime::ExecuteRbReq {
         chip,
         inputs: req.inputs,
@@ -179,7 +243,11 @@ pub async fn execute_rb(State(state): State<AppState>, Json(req): Json<ExecRbReq
                     let mut store = state.transition_receipts.write().unwrap();
                     store.insert(cid.to_string(), tr.clone());
                     // Also index by rho_cid for lookup convenience
-                    if let Some(rho) = tr.get("body").and_then(|b| b.get("rho_cid")).and_then(|r| r.as_str()) {
+                    if let Some(rho) = tr
+                        .get("body")
+                        .and_then(|b| b.get("rho_cid"))
+                        .and_then(|r| r.as_str())
+                    {
                         store.insert(rho.to_string(), tr.clone());
                     }
                 }
@@ -192,21 +260,32 @@ pub async fn execute_rb(State(state): State<AppState>, Json(req): Json<ExecRbReq
             };
             (StatusCode::OK, Json(resp)).into_response()
         }
-        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({
-            "error": "execute_rb_failed",
-            "detail": e.to_string()
-        }))).into_response(),
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "execute_rb_failed",
+                "detail": e.to_string()
+            })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn get_transition(State(state): State<AppState>, Path(cid): Path<String>) -> impl IntoResponse {
+pub async fn get_transition(
+    State(state): State<AppState>,
+    Path(cid): Path<String>,
+) -> impl IntoResponse {
     let store = state.transition_receipts.read().unwrap();
     match store.get(&cid) {
         Some(envelope) => (StatusCode::OK, Json(envelope.clone())).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({
-            "error": "transition_not_found",
-            "cid": cid
-        }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "transition_not_found",
+                "cid": cid
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -222,7 +301,9 @@ pub async fn execute_runtime(
     client: Option<Extension<ClientInfo>>,
     Json(req): Json<ExecRequestFull>,
 ) -> impl IntoResponse {
-    let cfg = ubl_runtime::ExecuteConfig { version: "0.1.0".into() };
+    let cfg = ubl_runtime::ExecuteConfig {
+        version: "0.1.0".into(),
+    };
 
     // Kid-scope check: if client has allowed_kids, verify active signing kid
     if let Some(Extension(ref ci)) = client {
@@ -253,21 +334,35 @@ pub async fn execute_runtime(
             // Store receipts + update seen_cids + update last_tip (unless ghost)
             if !run.ghost {
                 let mut store = state.receipt_chain.write().unwrap();
-                store.insert(run.wa.body_cid.clone(), serde_json::to_value(&run.wa).unwrap());
+                store.insert(
+                    run.wa.body_cid.clone(),
+                    serde_json::to_value(&run.wa).unwrap(),
+                );
                 if let Some(ref tr) = run.transition {
                     store.insert(tr.body_cid.clone(), serde_json::to_value(tr).unwrap());
                 }
-                store.insert(run.wf.body_cid.clone(), serde_json::to_value(&run.wf).unwrap());
+                store.insert(
+                    run.wf.body_cid.clone(),
+                    serde_json::to_value(&run.wf).unwrap(),
+                );
             }
 
             // Track idempotency key: pipeline:inputs_raw_cid
             {
-                let inputs_cid = run.wa.body.get("inputs_raw_cid")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                let pipeline = run.wa.body.get("intention")
+                let inputs_cid = run
+                    .wa
+                    .body
+                    .get("inputs_raw_cid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let pipeline = run
+                    .wa
+                    .body
+                    .get("intention")
                     .and_then(|v| v.get("pipeline"))
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                let key = format!("{}:{}", pipeline, inputs_cid);
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let key = format!("{pipeline}:{inputs_cid}");
                 let mut seen = state.seen_cids.write().unwrap();
                 seen.insert(key);
             }
@@ -277,7 +372,12 @@ pub async fn execute_runtime(
 
             // Get artifacts from the WF body (already computed inside run_with_receipts)
             let decision = run.wf.body.get("decision").cloned().unwrap_or(json!(null));
-            let dimension_stack = run.wf.body.get("dimension_stack").cloned().unwrap_or(json!([]));
+            let dimension_stack = run
+                .wf
+                .body
+                .get("dimension_stack")
+                .cloned()
+                .unwrap_or(json!([]));
 
             let resp = json!({
                 "cid": run.tip_cid,
@@ -301,10 +401,14 @@ pub async fn execute_runtime(
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
             };
-            (status, Json(json!({
-                "error": "execute_failed",
-                "detail": detail
-            }))).into_response()
+            (
+                status,
+                Json(json!({
+                    "error": "execute_failed",
+                    "detail": detail
+                })),
+            )
+                .into_response()
         }
     }
 }
