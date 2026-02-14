@@ -93,8 +93,11 @@ jobs:
 
       - name: Install git-cliff
         run: |
-          curl -sL https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          mv git-cliff-*/git-cliff /usr/local/bin/
+          VERSION=$(curl -sf https://api.github.com/repos/orhun/git-cliff/releases/latest | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+          curl -sfL "https://github.com/orhun/git-cliff/releases/download/${VERSION}/git-cliff-${VERSION#v}-x86_64-unknown-linux-gnu.tar.gz" -o cliff.tar.gz
+          tar xzf cliff.tar.gz
+          mv git-cliff-*/git-cliff /usr/local/bin/ 2>/dev/null || mv git-cliff /usr/local/bin/
+          git-cliff --version
 
       - name: Generate changelog for this release
         id: changelog
