@@ -1,0 +1,19 @@
+{
+  "name": "@ubl/sdk",
+  "version": "0.1.0",
+  "description": "UBL SDK — receipt-first execution client",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/test.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "typescript": "^5.4.0"
+  }
+}
