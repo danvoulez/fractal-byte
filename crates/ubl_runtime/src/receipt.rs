@@ -370,6 +370,7 @@ pub fn run_with_receipts(
         "outputs_cid": exec_result.cid,
         "decision": if exec_result.dimension_stack.contains(&"policy".to_string()) { "ALLOW" } else { "DENY" },
         "dimension_stack": exec_result.dimension_stack,
+        "policy_trace": exec_result.policy_trace,
     });
     let mut wf = build_receipt(
         "ubl/wf",
