@@ -91,31 +91,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install git-cliff
-        run: |
-          VERSION=$(curl -sf https://api.github.com/repos/orhun/git-cliff/releases/latest | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
-          curl -sfL "https://github.com/orhun/git-cliff/releases/download/${VERSION}/git-cliff-${VERSION#v}-x86_64-unknown-linux-gnu.tar.gz" -o cliff.tar.gz
-          tar xzf cliff.tar.gz
-          mv git-cliff-*/git-cliff /usr/local/bin/ 2>/dev/null || mv git-cliff /usr/local/bin/
-          git-cliff --version
-
-      - name: Generate changelog for this release
+      - name: Generate changelog
         id: changelog
-        run: |
-          # Generate changelog for commits since last tag
-          PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1 || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            git-cliff "${PREV_TAG}..${GITHUB_REF_NAME}" --strip header -o RELEASE_NOTES.md
-          else
-            git-cliff --strip header -o RELEASE_NOTES.md
-          fi
-          echo "Generated release notes:"
-          cat RELEASE_NOTES.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+          GITHUB_REPO: ${{ github.repository }}
 
       - name: Generate full changelog
-        run: |
-          git-cliff --output CHANGELOG.md
-          echo "Full changelog updated"
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --output CHANGELOG.md
+        env:
+          GITHUB_REPO: ${{ github.repository }}
 
       - name: Download artifact
         uses: actions/download-artifact@v4
