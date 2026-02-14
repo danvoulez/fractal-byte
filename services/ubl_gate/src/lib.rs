@@ -35,24 +35,73 @@ const DEV_TOKEN: &str = "ubl-dev-token-001";
 struct Bucket {
     tokens: f64,
     last_refill: Instant,
+    last_touch: u64,
 }
 
-/// Token-bucket rate limiter keyed by client_id.
+/// Quota for a rate-limit tier.
+#[derive(Debug, Clone, Copy)]
+pub struct Quota {
+    pub rpm: u32,
+    pub burst: u32,
+}
+
+impl Default for Quota {
+    fn default() -> Self {
+        Self { rpm: 100, burst: 50 }
+    }
+}
+
+/// Hierarchical token-bucket rate limiter.
+///
+/// Bucket key: `app:tenant:route:method:client_id`
+/// Quota resolution order:
+///   1. Per-route override for `(app, tenant, route, method)`
+///   2. Tenant-level override for `(app, tenant)`
+///   3. App-level default for `app`
+///   4. Global default
+///
+/// LRU bounded: when bucket count exceeds `max_buckets`, the least-recently-used
+/// bucket is evicted (deterministic via monotonic `touch_ctr`).
 #[derive(Clone)]
 pub struct RateLimiter {
-    /// Requests per minute (refill rate)
-    pub rpm: u32,
-    /// Max burst size
-    pub burst: u32,
-    buckets: Arc<Mutex<HashMap<String, Bucket>>>,
+    /// Global default quota
+    pub default_quota: Quota,
+    /// Per-app overrides: app → Quota
+    pub app_quotas: HashMap<String, Quota>,
+    /// Per-(app,tenant) overrides: "app:tenant" → Quota
+    pub tenant_quotas: HashMap<String, Quota>,
+    /// Per-route overrides: "app:tenant:route:method" → Quota
+    pub route_quotas: HashMap<String, Quota>,
+    /// Maximum number of tracked buckets before LRU eviction
+    max_buckets: usize,
+    inner: Arc<Mutex<RateLimiterInner>>,
+}
+
+struct RateLimiterInner {
+    buckets: HashMap<String, Bucket>,
+    touch_ctr: u64,
+}
+
+impl RateLimiterInner {
+    fn next_touch(&mut self) -> u64 {
+        let n = self.touch_ctr;
+        self.touch_ctr += 1;
+        n
+    }
 }
 
 impl RateLimiter {
     pub fn new(rpm: u32, burst: u32) -> Self {
         Self {
-            rpm,
-            burst,
-            buckets: Arc::new(Mutex::new(HashMap::new())),
+            default_quota: Quota { rpm, burst },
+            app_quotas: HashMap::new(),
+            tenant_quotas: HashMap::new(),
+            route_quotas: HashMap::new(),
+            max_buckets: 50_000,
+            inner: Arc::new(Mutex::new(RateLimiterInner {
+                buckets: HashMap::new(),
+                touch_ctr: 0,
+            })),
         }
     }
 
@@ -68,33 +117,86 @@ impl RateLimiter {
         Self::new(rpm, burst)
     }
 
-    /// Try to consume one token for the given client_id.
-    /// Returns (allowed, remaining, limit, retry_after_secs).
-    pub fn check(&self, client_id: &str) -> (bool, u32, u32, f64) {
-        let mut buckets = self.buckets.lock().unwrap();
-        let now = Instant::now();
-        let refill_rate = self.rpm as f64 / 60.0; // tokens per second
+    /// Resolve the effective quota for a request.
+    /// Lookup order: route → tenant → app → global.
+    pub fn resolve_quota(&self, app: &str, tenant: &str, route: &str, method: &str) -> Quota {
+        // 1. Per-route override
+        let route_key = format!("{app}:{tenant}:{route}:{method}");
+        if let Some(q) = self.route_quotas.get(&route_key) {
+            return *q;
+        }
+        // 2. Tenant-level override
+        let tenant_key = format!("{app}:{tenant}");
+        if let Some(q) = self.tenant_quotas.get(&tenant_key) {
+            return *q;
+        }
+        // 3. App-level default
+        if let Some(q) = self.app_quotas.get(app) {
+            return *q;
+        }
+        // 4. Global default
+        self.default_quota
+    }
 
-        let bucket = buckets
-            .entry(client_id.to_string())
+    /// Try to consume one token for the given hierarchical key.
+    /// Returns (allowed, remaining, limit, retry_after_secs).
+    pub fn check(
+        &self,
+        app: &str,
+        tenant: &str,
+        route: &str,
+        method: &str,
+        client_id: &str,
+    ) -> (bool, u32, u32, f64) {
+        let quota = self.resolve_quota(app, tenant, route, method);
+        let bucket_key = format!("{app}:{tenant}:{route}:{method}:{client_id}");
+
+        let mut inner = self.inner.lock().unwrap();
+        let now = Instant::now();
+        let refill_rate = quota.rpm as f64 / 60.0;
+
+        let touch = inner.next_touch();
+        let bucket = inner
+            .buckets
+            .entry(bucket_key)
             .or_insert_with(|| Bucket {
-                tokens: self.burst as f64,
+                tokens: quota.burst as f64,
                 last_refill: now,
+                last_touch: touch,
             });
+        bucket.last_touch = touch;
 
         // Refill tokens based on elapsed time
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(self.burst as f64);
+        bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(quota.burst as f64);
         bucket.last_refill = now;
 
-        if bucket.tokens >= 1.0 {
+        let result = if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
-            (true, bucket.tokens as u32, self.burst, 0.0)
+            (true, bucket.tokens as u32, quota.burst, 0.0)
         } else {
-            // Time until next token
             let retry_after = (1.0 - bucket.tokens) / refill_rate;
-            (false, 0, self.burst, retry_after)
+            (false, 0, quota.burst, retry_after)
+        };
+
+        // LRU eviction if over capacity
+        if inner.buckets.len() > self.max_buckets {
+            if let Some(victim) = inner
+                .buckets
+                .iter()
+                .min_by_key(|(_, b)| b.last_touch)
+                .map(|(k, _)| k.clone())
+            {
+                inner.buckets.remove(&victim);
+            }
         }
+
+        result
+    }
+
+    /// Backward-compatible check keyed only by client_id (legacy).
+    pub fn check_legacy(&self, client_id: &str) -> (bool, u32, u32, f64) {
+        self.check("default", "default", "*", "*", client_id)
     }
 }
 
@@ -525,13 +627,20 @@ async fn require_bearer_auth(state: AppState, mut req: Request, next: Next) -> R
     }
 }
 
-/// Middleware: per-client rate limiting. Runs AFTER auth (so ClientInfo is available).
+/// Middleware: hierarchical rate limiting (app→tenant→client).
+/// Runs AFTER auth (so ClientInfo is available) and scope is extractable from path.
 async fn rate_limit_middleware(state: AppState, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    let method = req.method().to_string();
     // Skip rate limiting for public/read-only paths
     if PUBLIC_PATHS.iter().any(|p| path == *p) {
         return next.run(req).await;
     }
+
+    // Resolve scope from path for hierarchical quota lookup
+    let scope = parse_scope_from_path(&path);
+    let app = scope.as_ref().map(|s| s.app.as_str()).unwrap_or("default");
+    let tenant = scope.as_ref().map(|s| s.tenant.as_str()).unwrap_or("default");
 
     // Get client_id from extensions (injected by auth middleware), fallback to "anonymous"
     let client_id = req
@@ -540,7 +649,8 @@ async fn rate_limit_middleware(state: AppState, req: Request, next: Next) -> Res
         .map(|ci| ci.client_id.clone())
         .unwrap_or_else(|| "anonymous".to_string());
 
-    let (allowed, remaining, limit, retry_after) = state.rate_limiter.check(&client_id);
+    let (allowed, remaining, limit, retry_after) =
+        state.rate_limiter.check(app, tenant, &path, &method, &client_id);
 
     if allowed {
         let mut resp = next.run(req).await;
@@ -550,9 +660,10 @@ async fn rate_limit_middleware(state: AppState, req: Request, next: Next) -> Res
         resp
     } else {
         let retry_secs = retry_after.ceil() as u64;
+        let quota = state.rate_limiter.resolve_quota(app, tenant, &path, &method);
         let body = json!({
             "error": "rate_limit_exceeded",
-            "detail": format!("client '{}' exceeded {} rpm", client_id, state.rate_limiter.rpm),
+            "detail": format!("client '{}' exceeded {} rpm", client_id, quota.rpm),
             "receipt": {
                 "t": "ubl/wf",
                 "body": {
@@ -716,6 +827,91 @@ mod cors_tests {
 
         let s = super::parse_scope_from_path("/a/x/t/y/v1/receipt/b3:abc");
         assert_eq!(s, Some(scope::Scope::new("x", "y")));
+    }
+}
+
+#[cfg(test)]
+mod ratelimit_tests {
+    use super::*;
+
+    #[test]
+    fn global_default_quota() {
+        let rl = RateLimiter::new(100, 50);
+        let q = rl.resolve_quota("any", "any", "/any", "POST");
+        assert_eq!(q.rpm, 100);
+        assert_eq!(q.burst, 50);
+    }
+
+    #[test]
+    fn app_level_override() {
+        let mut rl = RateLimiter::new(100, 50);
+        rl.app_quotas.insert("ubl".into(), Quota { rpm: 200, burst: 80 });
+        let q = rl.resolve_quota("ubl", "acme", "/v1/execute", "POST");
+        assert_eq!(q.rpm, 200);
+        // Different app falls back to global
+        let q = rl.resolve_quota("other", "acme", "/v1/execute", "POST");
+        assert_eq!(q.rpm, 100);
+    }
+
+    #[test]
+    fn tenant_level_override() {
+        let mut rl = RateLimiter::new(100, 50);
+        rl.app_quotas.insert("ubl".into(), Quota { rpm: 200, burst: 80 });
+        rl.tenant_quotas.insert("ubl:acme".into(), Quota { rpm: 300, burst: 120 });
+        // Tenant override wins over app
+        let q = rl.resolve_quota("ubl", "acme", "/v1/execute", "POST");
+        assert_eq!(q.rpm, 300);
+        // Different tenant falls back to app
+        let q = rl.resolve_quota("ubl", "beta", "/v1/execute", "POST");
+        assert_eq!(q.rpm, 200);
+    }
+
+    #[test]
+    fn route_level_override() {
+        let mut rl = RateLimiter::new(100, 50);
+        rl.tenant_quotas.insert("ubl:acme".into(), Quota { rpm: 300, burst: 120 });
+        rl.route_quotas.insert("ubl:acme:/v1/execute:POST".into(), Quota { rpm: 500, burst: 200 });
+        // Route override wins
+        let q = rl.resolve_quota("ubl", "acme", "/v1/execute", "POST");
+        assert_eq!(q.rpm, 500);
+        // Different route falls back to tenant
+        let q = rl.resolve_quota("ubl", "acme", "/v1/receipts", "GET");
+        assert_eq!(q.rpm, 300);
+    }
+
+    #[test]
+    fn hierarchical_check_respects_burst() {
+        let rl = RateLimiter::new(100, 3);
+        // 3 requests within burst
+        for _ in 0..3 {
+            let (allowed, _, _, _) = rl.check("app", "t", "/r", "POST", "c1");
+            assert!(allowed);
+        }
+        // 4th should be denied
+        let (allowed, _, limit, retry_after) = rl.check("app", "t", "/r", "POST", "c1");
+        assert!(!allowed);
+        assert_eq!(limit, 3);
+        assert!(retry_after > 0.0);
+    }
+
+    #[test]
+    fn different_clients_independent_buckets() {
+        let rl = RateLimiter::new(100, 2);
+        rl.check("a", "t", "/r", "POST", "c1");
+        rl.check("a", "t", "/r", "POST", "c1");
+        // c1 exhausted
+        let (allowed, _, _, _) = rl.check("a", "t", "/r", "POST", "c1");
+        assert!(!allowed);
+        // c2 still has tokens
+        let (allowed, _, _, _) = rl.check("a", "t", "/r", "POST", "c2");
+        assert!(allowed);
+    }
+
+    #[test]
+    fn legacy_check_works() {
+        let rl = RateLimiter::new(100, 2);
+        let (allowed, _, _, _) = rl.check_legacy("client1");
+        assert!(allowed);
     }
 }
 
