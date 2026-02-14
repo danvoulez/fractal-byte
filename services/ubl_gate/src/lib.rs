@@ -147,6 +147,96 @@ impl TokenStore {
     }
 }
 
+// ── Per-tenant CORS ─────────────────────────────────────────────
+
+/// CORS configuration supporting per-tenant origin allowlists.
+/// Global origins apply to all requests. Tenant origins apply only
+/// when the authenticated client belongs to that tenant.
+#[derive(Clone, Debug)]
+pub struct CorsConfig {
+    /// Origins allowed for all tenants.
+    pub global_origins: Vec<String>,
+    /// Per-tenant origin overrides. Key = tenant_id.
+    pub tenant_origins: HashMap<String, Vec<String>>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl CorsConfig {
+    /// Build from environment variables:
+    /// - `CORS_GLOBAL_ORIGINS`: comma-separated list of global origins
+    /// - `CORS_TENANT_<TENANT_ID>_ORIGINS`: comma-separated list per tenant
+    ///
+    /// Falls back to sensible defaults for dev.
+    pub fn from_env() -> Self {
+        let global = std::env::var("CORS_GLOBAL_ORIGINS")
+            .unwrap_or_else(|_| [
+                "https://api.ubl.agency",
+                "https://ui.ubl.agency",
+                "https://tunnel.ubl.agency",
+                "https://ubl.agency",
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "http://localhost:5173",
+            ].join(","));
+        let global_origins: Vec<String> = global
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut tenant_origins: HashMap<String, Vec<String>> = HashMap::new();
+        for (key, val) in std::env::vars() {
+            if let Some(tenant_id) = key
+                .strip_prefix("CORS_TENANT_")
+                .and_then(|rest| rest.strip_suffix("_ORIGINS"))
+            {
+                let origins: Vec<String> = val
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !origins.is_empty() {
+                    tenant_origins.insert(tenant_id.to_lowercase(), origins);
+                }
+            }
+        }
+
+        Self {
+            global_origins,
+            tenant_origins,
+        }
+    }
+
+    /// Check if an origin is allowed for a given tenant.
+    pub fn is_origin_allowed(&self, origin: &str, tenant_id: Option<&str>) -> bool {
+        // Global origins always allowed
+        if self.global_origins.iter().any(|o| o == origin) {
+            return true;
+        }
+        // Tenant-specific origins
+        if let Some(tid) = tenant_id {
+            if let Some(origins) = self.tenant_origins.get(tid) {
+                return origins.iter().any(|o| o == origin);
+            }
+        }
+        false
+    }
+
+    /// Return all allowed origins for a tenant (global + tenant-specific).
+    pub fn allowed_origins_for(&self, tenant_id: &str) -> Vec<String> {
+        let mut origins = self.global_origins.clone();
+        if let Some(tenant_specific) = self.tenant_origins.get(tenant_id) {
+            origins.extend(tenant_specific.iter().cloned());
+        }
+        origins
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub transition_receipts: Arc<RwLock<HashMap<String, serde_json::Value>>>,
@@ -158,6 +248,7 @@ pub struct AppState {
     /// When true, auth middleware is bypassed (for tests / dev)
     pub auth_disabled: bool,
     pub rate_limiter: RateLimiter,
+    pub cors_config: CorsConfig,
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
@@ -175,6 +266,7 @@ impl Default for AppState {
             token_store: TokenStore::with_dev_token(),
             auth_disabled,
             rate_limiter: RateLimiter::from_env(),
+            cors_config: CorsConfig::from_env(),
             metrics_handle: init_metrics(),
         }
     }
@@ -195,6 +287,7 @@ pub fn app_with_state(state: AppState) -> Router {
     let auth_state = state.clone();
     let rl_state = state.clone();
     let _metrics_state = state.clone();
+    let cors_config = state.cors_config.clone();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics_endpoint))
@@ -211,14 +304,14 @@ pub fn app_with_state(state: AppState) -> Router {
         .route("/.well-known/did.json", get(api::well_known_did_json))
         .layer(
             CorsLayer::new()
-                .allow_origin([
-                    "https://api.ubl.agency".parse::<HeaderValue>().unwrap(),
-                    "https://ui.ubl.agency".parse::<HeaderValue>().unwrap(),
-                    "https://tunnel.ubl.agency".parse::<HeaderValue>().unwrap(),
-                    "https://ubl.agency".parse::<HeaderValue>().unwrap(),
-                    "http://localhost:3000".parse::<HeaderValue>().unwrap(),
-                    "http://localhost:3001".parse::<HeaderValue>().unwrap(),
-                ])
+                .allow_origin(tower_http::cors::AllowOrigin::predicate(
+                    move |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
+                        origin
+                            .to_str()
+                            .map(|o| cors_config.is_origin_allowed(o, None))
+                            .unwrap_or(false)
+                    },
+                ))
                 .allow_methods([
                     axum::http::Method::GET,
                     axum::http::Method::POST,
@@ -403,6 +496,68 @@ async fn metrics_endpoint(State(state): axum::extract::State<AppState>) -> impl 
             .into_response()
     } else {
         (StatusCode::OK, "# no metrics recorder installed\n").into_response()
+    }
+}
+
+#[cfg(test)]
+mod cors_tests {
+    use super::*;
+
+    #[test]
+    fn global_origin_allowed() {
+        let cfg = CorsConfig {
+            global_origins: vec!["https://ubl.agency".into(), "http://localhost:3000".into()],
+            tenant_origins: HashMap::new(),
+        };
+        assert!(cfg.is_origin_allowed("https://ubl.agency", None));
+        assert!(cfg.is_origin_allowed("http://localhost:3000", None));
+        assert!(!cfg.is_origin_allowed("https://evil.com", None));
+    }
+
+    #[test]
+    fn tenant_origin_allowed() {
+        let mut tenant_origins = HashMap::new();
+        tenant_origins.insert("acme".into(), vec!["https://app.acme.com".into()]);
+        let cfg = CorsConfig {
+            global_origins: vec!["https://ubl.agency".into()],
+            tenant_origins,
+        };
+        // Tenant-specific origin allowed for that tenant
+        assert!(cfg.is_origin_allowed("https://app.acme.com", Some("acme")));
+        // Not allowed for a different tenant
+        assert!(!cfg.is_origin_allowed("https://app.acme.com", Some("other")));
+        // Not allowed without tenant context
+        assert!(!cfg.is_origin_allowed("https://app.acme.com", None));
+        // Global still works for any tenant
+        assert!(cfg.is_origin_allowed("https://ubl.agency", Some("acme")));
+    }
+
+    #[test]
+    fn allowed_origins_for_merges() {
+        let mut tenant_origins = HashMap::new();
+        tenant_origins.insert("acme".into(), vec!["https://app.acme.com".into()]);
+        let cfg = CorsConfig {
+            global_origins: vec!["https://ubl.agency".into()],
+            tenant_origins,
+        };
+        let origins = cfg.allowed_origins_for("acme");
+        assert_eq!(origins.len(), 2);
+        assert!(origins.contains(&"https://ubl.agency".into()));
+        assert!(origins.contains(&"https://app.acme.com".into()));
+
+        // Unknown tenant gets only global
+        let origins = cfg.allowed_origins_for("unknown");
+        assert_eq!(origins.len(), 1);
+    }
+
+    #[test]
+    fn empty_config() {
+        let cfg = CorsConfig {
+            global_origins: vec![],
+            tenant_origins: HashMap::new(),
+        };
+        assert!(!cfg.is_origin_allowed("https://anything.com", None));
+        assert!(cfg.allowed_origins_for("any").is_empty());
     }
 }
 
